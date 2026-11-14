@@ -1,0 +1,19 @@
+[Unit]
+Description=OmniQ-OS Quantum Processing Unit Daemon & QMMU Watchdog
+After=network.target local-fs.target
+Documentation=https://github.com/omniq/omniqos-linux
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/omniqd --daemon
+Restart=always
+RestartSec=3
+User=root
+Group=quantum
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=90
+LimitMEMLOCK=infinity
+DeviceAllow=/dev/accel/qpu0 rw
+
+[Install]
+WantedBy=multi-user.target

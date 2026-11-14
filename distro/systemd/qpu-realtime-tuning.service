@@ -1,0 +1,23 @@
+[Unit]
+Description=OmniQ-OS Hard Real-Time Kernel & Hardware Accelerator Tuning
+After=systemd-modules-load.service
+Before=omniqd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '\
+    echo -1 > /proc/sys/kernel/sched_rt_runtime_us; \
+    echo 0 > /proc/sys/kernel/hung_task_timeout_secs; \
+    if [ -d /sys/devices/system/cpu/cpu2 ]; then \
+        echo "Pinning non-RT interrupts to cores 0-1..."; \
+        systemd-run --scope -p CPUAffinity=0-1 /bin/true; \
+    fi; \
+    if command -v tuned-adm >/dev/null 2>&1; then \
+        tuned-adm profile realtime; \
+    fi; \
+    chmod 666 /dev/accel/qpu* 2>/dev/null || true; \
+'
+
+[Install]
+WantedBy=basic.target

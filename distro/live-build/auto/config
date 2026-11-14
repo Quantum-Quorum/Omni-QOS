@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+lb config noauto \
+    --mode ubuntu \
+    --distribution noble \
+    --architectures amd64 \
+    --archive-areas "main restricted universe multiverse" \
+    --mirror-bootstrap "http://archive.ubuntu.com/ubuntu/" \
+    --mirror-chroot "http://archive.ubuntu.com/ubuntu/" \
+    --mirror-binary "http://archive.ubuntu.com/ubuntu/" \
+    --linux-packages "linux-image-rt-amd64" \
+    --bootloader grub-efi \
+    --image-name "OmniQ-OS-24.04-RT-amd64" \
+    --iso-application "OmniQ-OS Real-Time Quantum Linux" \
+    --iso-publisher "OmniQ Project <developers@omniq.org>" \
+    --iso-volume "OMNIQOS_2404_RT" \
+    "${@}"
