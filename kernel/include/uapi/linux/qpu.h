@@ -191,3 +191,4 @@ struct qpu_p2p_dma_desc {
 	_IOWR(QPU_IOCTL_MAGIC, 0x07, struct qpu_p2p_dma_desc)
 
 #endif /* _UAPI_LINUX_QPU_H */
+

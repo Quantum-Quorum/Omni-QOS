@@ -130,3 +130,4 @@ void qpu_pci_cleanup(struct qpu_device *qdev)
 	(void)qdev;
 #endif
 }
+

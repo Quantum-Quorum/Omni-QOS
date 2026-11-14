@@ -159,3 +159,4 @@ MODULE_AUTHOR("OmniQ Project <developers@omniq.org>");
 MODULE_DESCRIPTION("OmniQ-OS Real-Time Quantum Compute Accelerator Driver");
 MODULE_VERSION(QPU_DRIVER_VERSION);
 #endif
+

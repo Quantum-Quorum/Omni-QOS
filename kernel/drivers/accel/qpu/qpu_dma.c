@@ -41,3 +41,4 @@ void qpu_dma_cleanup(struct qpu_device *qdev)
 {
 	(void)qdev;
 }
+

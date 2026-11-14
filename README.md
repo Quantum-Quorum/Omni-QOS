@@ -117,3 +117,4 @@ omniqos-linux/
 ## 5. License
 
 OmniQ-OS kernel subsystems are licensed under **GPLv2** (as required for upstream Linux kernel drivers). Userland libraries, tools, and runtimes are licensed under the **Apache License, Version 2.0**.
+

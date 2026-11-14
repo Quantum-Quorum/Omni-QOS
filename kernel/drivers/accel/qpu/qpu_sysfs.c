@@ -144,3 +144,4 @@ void qpu_sysfs_cleanup(struct qpu_device *qdev)
 	(void)qdev;
 #endif
 }
+

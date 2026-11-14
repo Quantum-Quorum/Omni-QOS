@@ -66,3 +66,4 @@ void qpu_keepalive_stop(struct qpu_device *qdev)
 	(void)qdev;
 #endif
 }
+
