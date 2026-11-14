@@ -29,7 +29,7 @@
 struct file;
 #endif
 
-#include "../../include/uapi/linux/qpu.h"
+#include <linux/qpu.h>
 
 #define QPU_DRIVER_NAME    "omniq_qpu"
 #define QPU_DRIVER_VERSION "0.1.0-rt"

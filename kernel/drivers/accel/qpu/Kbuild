@@ -16,3 +16,4 @@ omniq_qpu-y := \
 	qpu_fallback.o
 
 ccflags-y += -I$(src)/../../include/uapi
+
