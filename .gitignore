@@ -24,4 +24,7 @@ bin/
 *~
 .vscode/
 .idea/
+__pycache__/
+*.pyc
+*.pyo
 
