@@ -1,0 +1,26 @@
+# Object files and kernel build artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.order
+*.symvers
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+
+# Build output
+build/
+bin/
+*.a
+*.so
+*.dylib
+
+# Editor and OS
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
