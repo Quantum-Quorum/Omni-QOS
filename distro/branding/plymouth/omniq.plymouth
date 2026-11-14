@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=OmniQ-OS Quantum Splash
+Description=Minimalist Electric Cyan Quantum Boot Splash for OmniQ-OS
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/omniq
+ScriptFile=/usr/share/plymouth/themes/omniq/omniq.script

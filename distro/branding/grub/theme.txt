@@ -1,0 +1,38 @@
+# OmniQ-OS GRUB 2 Theme
+# Option A Brand Identity: Electric Cyan (#00e5ff) on Obsidian Black (#080a0f)
+
+title-text: ""
+desktop-image: "background.png"
+desktop-color: "#080a0f"
+
+# Terminal / Title Font
+terminal-font: "Unifont Regular 16"
+
+# Boot Menu Component
++ boot_menu {
+    left = 20%
+    top = 35%
+    width = 60%
+    height = 50%
+    item_font = "DejaVu Sans Regular 16"
+    item_color = "#94a3b8"
+    selected_item_font = "DejaVu Sans Bold 16"
+    selected_item_color = "#00e5ff"
+    selected_item_pixmap_style = "highlight_c.png"
+    item_height = 42
+    item_padding = 10
+    item_spacing = 8
+}
+
+# Progress Bar
++ progress_bar {
+    id = "__timeout__"
+    left = 20%
+    top = 88%
+    width = 60%
+    height = 12
+    text_color = "#00e5ff"
+    font = "DejaVu Sans Regular 12"
+    bar_style = "progress_bar_c.png"
+    highlight_style = "progress_highlight_c.png"
+}

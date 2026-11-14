@@ -1,0 +1,29 @@
+# OmniQ-OS GRUB Bootloader Configuration Template
+
+set timeout=5
+set default="0"
+
+# Load OmniQ-OS Theme
+insmod gfxterm
+insmod png
+set theme=/boot/grub/themes/omniq/theme.txt
+
+menuentry "OmniQ-OS 24.04 LTS (Real-Time Quantum Linux - Hardware Auto-Detect)" {
+    set gfxpayload=keep
+    linux /boot/vmlinuz-6.8.0-rt root=UUID=${ROOT_UUID} ro quiet splash \
+        isolcpus=managed,domain,2-15 nohz_full=2-15 rcu_nocbs=2-15 \
+        intel_idle.max_cstate=0 processor.max_cstate=0 mce=ignore_ce
+    initrd /boot/initrd.img-6.8.0-rt
+}
+
+menuentry "OmniQ-OS 24.04 LTS (Force Virt-QPU Simulator Fallback Mode)" {
+    set gfxpayload=keep
+    linux /boot/vmlinuz-6.8.0-rt root=UUID=${ROOT_UUID} ro quiet splash omniq_force_simulator=1
+    initrd /boot/initrd.img-6.8.0-rt
+}
+
+menuentry "OmniQ-OS 24.04 LTS (Cryogenic Hardware Diagnostics & Calibration)" {
+    set gfxpayload=keep
+    linux /boot/vmlinuz-6.8.0-rt root=UUID=${ROOT_UUID} ro single omniq_diag=1
+    initrd /boot/initrd.img-6.8.0-rt
+}
