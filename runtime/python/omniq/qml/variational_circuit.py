@@ -1,26 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
 """
-Variational circuit implementation for quantum machine learning.
+Parameterized Variational Quantum Circuit for Quantum Machine Learning.
 """
 
+import math
+from typing import Sequence
 import numpy as np
-from typing import List, Optional, Callable
+from ..circuit import Circuit, Statevector
+
 
 class VariationalCircuit:
-    """Variational quantum circuit for parameterized quantum computing."""
-    
-    def __init__(self, num_qubits: int, num_params: int):
-        self.num_qubits = num_qubits
-        self.num_params = num_params
-        self.params = np.random.randn(num_params)
-    
-    def forward(self, params: Optional[np.ndarray] = None):
-        """Forward pass of the variational circuit."""
-        if params is not None:
-            self.params = params
-        # Placeholder implementation
-        return None
-    
-    def gradient(self, params: Optional[np.ndarray] = None):
-        """Calculate gradients with respect to parameters."""
-        # Placeholder implementation
-        return np.zeros_like(self.params) 
+    def __init__(self, num_qubits: int = 2, num_layers: int = 2):
+        self.num_qubits = int(num_qubits)
+        self.num_layers = int(num_layers)
+        self.weights = np.random.default_rng(42).uniform(-0.5, 0.5, size=(self.num_layers, self.num_qubits, 2))
+
+    def build(self, features: Sequence[float], weights: np.ndarray = None) -> Circuit:
+        w = self.weights if weights is None else weights
+        c = Circuit(self.num_qubits)
+        for q in range(self.num_qubits):
+            x_val = float(features[q % len(features)]) if len(features) > 0 else 0.0
+            c.ry(q, x_val * math.pi)
+        for l in range(self.num_layers):
+            for q in range(self.num_qubits):
+                c.ry(q, float(w[l, q, 0])).rz(q, float(w[l, q, 1]))
+            for q in range(self.num_qubits - 1):
+                c.cx(q, q + 1)
+        return c
+
+    def forward(self, features: Sequence[float], weights: np.ndarray = None) -> float:
+        sv = self.build(features, weights).execute()
+        assert isinstance(sv, Statevector)
+        return sv.measure_expectation(0, "Z")

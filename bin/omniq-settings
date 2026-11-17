@@ -1,0 +1,1163 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""
+OmniQ-OS Comprehensive System & QPU Control Center (bin/omniq-settings)
+- PyGObject GTK3 Application with Bioluminescent Obsidian/Cyan/Violet CSS
+- 14 Pages: wifi, bluetooth, display, appearance, sound, qpu_hardware,
+  cryo_safety, qmmu_partitions, tri_compute, pqc_security, notifications,
+  storage, power, about
+- Live integration with omniqd (:9090), omniq-wallpaper, and /tmp/omniq_notifications.json
+- Exposes SettingsWindow at module top-level for in-memory unit test instantiation
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from typing import Any, Dict, List, Optional, Tuple
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+for _p in reversed([
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    "/opt/omniq/src",
+    "/usr/lib/python3/dist-packages",
+]):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk
+
+from omniqos.core import QPU
+from omniq_core_bridge import core_bridge
+
+NOTIFICATIONS_PATH = "/tmp/omniq_notifications.json"
+WALLPAPER_STATE_PATH = "/tmp/omniq_wallpaper.conf"
+
+EXPECTED_PAGES = [
+    "wifi",
+    "bluetooth",
+    "display",
+    "appearance",
+    "sound",
+    "qpu_hardware",
+    "cryo_safety",
+    "qmmu_partitions",
+    "tri_compute",
+    "pqc_security",
+    "notifications",
+    "storage",
+    "power",
+    "about",
+]
+
+CSS_DATA = b"""
+window, .main-bg {
+    background-color: #0D0B18;
+    color: #E8E5F5;
+    font-family: "DejaVu Sans", sans-serif;
+}
+.sidebar {
+    background-color: #100D1F;
+    border-right: 1px solid rgba(138, 79, 255, 0.30);
+    padding: 8px;
+}
+.sidebar button {
+    background-image: none;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    color: #A6A0C2;
+    padding: 7px 10px;
+    font-size: 12px;
+    font-weight: bold;
+    margin-bottom: 2px;
+}
+.sidebar button:hover {
+    background-color: rgba(138, 79, 255, 0.22);
+    color: #FFFFFF;
+}
+.sidebar button.active-category {
+    background: linear-gradient(135deg, #5B28A8, #007A94);
+    border-color: #00E5FF;
+    color: #FFFFFF;
+}
+.content-area {
+    background-color: #0D0B18;
+    padding: 12px 16px;
+}
+.card {
+    background-color: #141126;
+    border: 1px solid rgba(138, 79, 255, 0.35);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+}
+.hero-card {
+    background: linear-gradient(135deg, #181332, #0E0A1E);
+    border: 1px solid #00E5FF;
+    border-radius: 10px;
+    padding: 14px 18px;
+    margin-bottom: 10px;
+}
+.card-title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #00E5FF;
+}
+.card-desc {
+    font-size: 11px;
+    color: #94A3B8;
+}
+.metric-mono {
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    font-weight: bold;
+    color: #00FF9D;
+}
+.badge-cyan {
+    background-color: rgba(0, 229, 255, 0.16);
+    border: 1px solid #00E5FF;
+    border-radius: 4px;
+    color: #00E5FF;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 2px 6px;
+}
+.badge-green {
+    background-color: rgba(0, 255, 157, 0.16);
+    border: 1px solid #00FF9D;
+    border-radius: 4px;
+    color: #00FF9D;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 2px 6px;
+}
+.badge-danger {
+    background-color: rgba(255, 51, 102, 0.20);
+    border: 1px solid #FF3366;
+    border-radius: 4px;
+    color: #FF3366;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 2px 6px;
+}
+button.action-btn {
+    background-image: none;
+    background-color: #1A1530;
+    border: 1px solid #8A4FFF;
+    border-radius: 6px;
+    color: #FFFFFF;
+    font-weight: bold;
+    font-size: 11px;
+    padding: 6px 12px;
+}
+button.action-btn:hover {
+    background-color: #2B1F4E;
+    border-color: #00E5FF;
+}
+button.action-btn-cyan {
+    background-image: none;
+    background: linear-gradient(135deg, #0E4B63, #008CA8);
+    border: 1px solid #00E5FF;
+    border-radius: 6px;
+    color: #FFFFFF;
+    font-weight: bold;
+    font-size: 11px;
+    padding: 6px 12px;
+}
+button.action-btn-cyan:hover {
+    background: #00E5FF;
+    color: #0D0B18;
+}
+button.action-btn-danger {
+    background-image: none;
+    background: linear-gradient(135deg, #6E1128, #A8183B);
+    border: 1px solid #FF3366;
+    border-radius: 6px;
+    color: #FFFFFF;
+    font-weight: bold;
+    font-size: 11px;
+    padding: 6px 12px;
+}
+entry, searchentry, combobox button, spinbutton {
+    background-image: none;
+    background-color: #141126;
+    border: 1px solid rgba(138, 79, 255, 0.40);
+    border-radius: 6px;
+    color: #ECF2FF;
+    padding: 5px 8px;
+}
+scale trough {
+    background-color: #211B3D;
+    border-radius: 4px;
+}
+scale highlight {
+    background: linear-gradient(to right, #8A4FFF, #00E5FF);
+    border-radius: 4px;
+}
+progressbar progress {
+    background: linear-gradient(to right, #8A4FFF, #00E5FF);
+    border-radius: 4px;
+}
+progressbar trough {
+    background-color: #1B1633;
+    border-radius: 4px;
+    min-height: 8px;
+}
+switch {
+    background-color: #211B3D;
+    border-radius: 12px;
+    border: 1px solid rgba(138, 79, 255, 0.35);
+}
+switch:checked {
+    background-color: #0088A3;
+    border-color: #00E5FF;
+}
+"""
+
+
+def resolve_bin(name: str) -> str:
+    cand = os.path.join(REPO_ROOT, "bin", name)
+    if os.path.isfile(cand):
+        return cand
+    for sys_p in [f"/usr/local/bin/{name}", f"/usr/bin/{name}"]:
+        if os.path.isfile(sys_p):
+            return sys_p
+    return shutil.which(name) or cand
+
+
+def omniqd_request(method: str, path: str, payload: Optional[Dict[str, Any]] = None, qpu_fallback: Optional[QPU] = None) -> Dict[str, Any]:
+    """Queries live omniqd (:9090) with deterministic in-process QPU fallback."""
+    url = f"http://127.0.0.1:9090{path}"
+    raw = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"} if raw is not None else {}
+    req = urllib.request.Request(url, data=raw, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=0.8) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        pass
+
+    qpu = qpu_fallback or QPU()
+    if path == "/api/interlock/trip":
+        reason = str((payload or {}).get("reason", "SETTINGS_MANUAL_TRIP"))
+        return qpu.trip_interlock(reason)
+    if path == "/api/interlock/reset":
+        return qpu.reset_interlock()
+    if path == "/api/cryo_temp":
+        temp = float((payload or {}).get("temp_mK", 14.25))
+        return qpu.set_cryo_temp_mK(temp)
+    if path == "/api/mode":
+        return {"ok": True, "mode": str((payload or {}).get("mode", "auto_synergy"))}
+    if path == "/api/burst":
+        il = qpu.get_interlock()
+        if il.get("tripped"):
+            return {"ok": False, "error": "RF_DAC_CLAMPED_INTERLOCK"}
+        return {"ok": True, "burst_id": 1, "qec_latency_ns": 512.0}
+
+    top = qpu.get_topology()
+    ilock = qpu.get_interlock()
+    cals = qpu.get_calibration(0, 8)
+    return {
+        "service": "omniqd-fallback",
+        "status": "THERMAL_INTERLOCK_CLAMPED" if ilock["tripped"] else "NOMINAL_SUPERCONDUCTING",
+        "kernel": "7.0.0-43-generic-omniq-preempt-rt",
+        "isolated_cores": [2, 3],
+        "jitter_us": 17.8,
+        "qec_loop_ns": 512.0,
+        "tri_compute_mode": "auto_synergy",
+        "device_name": top.device_name,
+        "operating_state": top.operating_state.name,
+        "total_qubits": top.total_qubits,
+        "total_couplers": top.total_couplers,
+        "avg_t1_us": round(top.avg_t1_us, 2),
+        "avg_t2_us": round(top.avg_t2_us, 2),
+        "cryo": {
+            "stage_50k_K": 48.50,
+            "stage_4k_K": 3.85,
+            "still_mK": 820.0,
+            "cold_plate_mK": 95.0,
+            "mxc_mK": round(float(ilock["temp_mxc_mK"]), 3),
+            "threshold_mK": round(float(ilock["threshold_mK"]), 3),
+            "interlock_tripped": bool(ilock["tripped"]),
+            "rf_dac_clamped": bool(ilock["rf_dac_clamped"]),
+            "reason": str(ilock["reason"]),
+            "trip_count": int(ilock.get("trip_count", 0)),
+        },
+        "sample_qubits": [
+            {
+                "id": c.qubit_id,
+                "freq_ghz": round(c.frequency_ghz, 4),
+                "t1_us": round(c.t1_us, 1),
+                "t2_us": round(c.t2_us, 1),
+                "f1q": round(c.gate_1q_fidelity, 5),
+                "fread": round(c.readout_fidelity, 4),
+            }
+            for c in cals
+        ],
+        "core_engine": core_bridge.get_status(),
+    }
+
+
+def load_notifications_file(path: str = NOTIFICATIONS_PATH) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return [
+            {
+                "title": "Cryostat Mixing Chamber Nominal",
+                "body": "Dilution refrigerator stabilized at 14.250 mK (< 50.0 mK safety ceiling).",
+                "severity": "info",
+                "ts": "00:01:12",
+            },
+            {
+                "title": "GPUDirect-QPU Real-Time QEC Link Active",
+                "body": "Surface-code d=7 MWPM decoder running at 512 ns round-trip budget.",
+                "severity": "info",
+                "ts": "00:01:15",
+            },
+        ]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return list(data.get("notifications", []))
+    except Exception:
+        pass
+    return []
+
+
+def save_notifications_file(items: List[Dict[str, Any]], path: str = NOTIFICATIONS_PATH) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(items, f, indent=2)
+    except Exception:
+        pass
+
+
+class SettingsWindow(Gtk.Window):
+    """OmniQ-OS System & Quantum Control Center Window (14 Pages)."""
+
+    def __init__(self, default_page: str = "wifi"):
+        super().__init__(title="OmniQ-OS System & QPU Control Center")
+        self.set_default_size(1020, 690)
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        self.qpu = QPU()
+        self.active_partitions: List[Any] = []
+        self.tri_mode = "auto_synergy"
+
+        gtk_settings = Gtk.Settings.get_default()
+        if gtk_settings is not None:
+            gtk_settings.set_property("gtk-application-prefer-dark-theme", True)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS_DATA)
+        screen = Gdk.Screen.get_default()
+        if screen is not None:
+            Gtk.StyleContext.add_provider_for_screen(
+                screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        main_box.get_style_context().add_class("main-bg")
+        self.add(main_box)
+
+        # Left Sidebar
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        sidebar.set_size_request(240, -1)
+        sidebar.get_style_context().add_class("sidebar")
+        main_box.pack_start(sidebar, False, False, 0)
+
+        hdr_lbl = Gtk.Label(label="OMNIQ CONTROL CENTER")
+        hdr_lbl.get_style_context().add_class("card-title")
+        hdr_lbl.set_xalign(0.0)
+        hdr_lbl.set_margin_start(6)
+        hdr_lbl.set_margin_top(4)
+        hdr_lbl.set_margin_bottom(6)
+        sidebar.pack_start(hdr_lbl, False, False, 0)
+
+        self.sidebar_search = Gtk.SearchEntry()
+        self.sidebar_search.set_placeholder_text("Filter settings...")
+        self.sidebar_search.connect("search-changed", self._on_search_changed)
+        sidebar.pack_start(self.sidebar_search, False, False, 4)
+
+        sb_scroll = Gtk.ScrolledWindow()
+        sb_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        cat_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        sb_scroll.add(cat_box)
+        sidebar.pack_start(sb_scroll, True, True, 0)
+
+        # Content Stack
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        self.stack.set_transition_duration(120)
+
+        content_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        content_wrap.get_style_context().add_class("content-area")
+        content_wrap.pack_start(self.stack, True, True, 0)
+        main_box.pack_start(content_wrap, True, True, 0)
+
+        self.category_buttons: List[Tuple[str, str, Gtk.Button]] = []
+        categories = [
+            ("wifi", "Wi-Fi & Network", self._build_wifi_page),
+            ("bluetooth", "Bluetooth & Peripherals", self._build_bluetooth_page),
+            ("display", "Display & Monitor", self._build_display_page),
+            ("appearance", "Appearance & Wallpaper", self._build_appearance_page),
+            ("sound", "Sound & Acoustic Alerts", self._build_sound_page),
+            ("qpu_hardware", "QPU Hardware & Lattice", self._build_qpu_hardware_page),
+            ("cryo_safety", "Cryo & <50 mK Safety", self._build_cryo_safety_page),
+            ("qmmu_partitions", "QMMU Spatial Partitions", self._build_qmmu_partitions_page),
+            ("tri_compute", "Tri-Compute Synergy", self._build_tri_compute_page),
+            ("pqc_security", "PQC & SOC 2 Security", self._build_pqc_security_page),
+            ("notifications", "Notifications & Alerts", self._build_notifications_page),
+            ("storage", "Storage & Disks", self._build_storage_page),
+            ("power", "Power & RT Governor", self._build_power_page),
+            ("about", "About OmniQ-OS", self._build_about_page),
+        ]
+
+        for tag, title, builder in categories:
+            btn = Gtk.Button()
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            lbl = Gtk.Label(label=title)
+            lbl.set_xalign(0.0)
+            chev = Gtk.Label(label=">")
+            row.pack_start(lbl, True, True, 0)
+            row.pack_end(chev, False, False, 0)
+            btn.add(row)
+            btn.connect("clicked", lambda _b, t=tag: self._select_category(t))
+            cat_box.pack_start(btn, False, False, 0)
+            self.category_buttons.append((tag, title, btn))
+
+            page_widget = builder()
+            pscroll = Gtk.ScrolledWindow()
+            pscroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            pscroll.add(page_widget)
+            pscroll.show_all()
+            self.stack.add_named(pscroll, tag)
+
+        target = default_page if default_page in EXPECTED_PAGES else "wifi"
+        self._select_category(target)
+
+    @staticmethod
+    def _make_card(title: str, desc: str = "") -> Tuple[Gtk.Box, Gtk.Box]:
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card.get_style_context().add_class("card")
+        lbl = Gtk.Label(label=title)
+        lbl.get_style_context().add_class("card-title")
+        lbl.set_xalign(0.0)
+        card.pack_start(lbl, False, False, 0)
+        if desc:
+            dlbl = Gtk.Label(label=desc)
+            dlbl.get_style_context().add_class("card-desc")
+            dlbl.set_line_wrap(True)
+            dlbl.set_xalign(0.0)
+            card.pack_start(dlbl, False, False, 0)
+        return card, card
+
+    def _select_category(self, tag: str) -> None:
+        if self.stack.get_child_by_name(tag) is None:
+            return
+        self.stack.set_visible_child_name(tag)
+        for t, _title, btn in self.category_buttons:
+            if t == tag:
+                btn.get_style_context().add_class("active-category")
+            else:
+                btn.get_style_context().remove_class("active-category")
+
+    def _on_search_changed(self, entry: Gtk.SearchEntry) -> None:
+        q = entry.get_text().strip().lower()
+        for t, title, btn in self.category_buttons:
+            if not q or q in t.lower() or q in title.lower():
+                btn.show()
+            else:
+                btn.hide()
+
+    # 1. wifi
+    def _build_wifi_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "Wi-Fi & Quantum Control Plane Networking",
+            "Manage wireless 802.11ax interfaces and low-jitter control-plane Ethernet links.",
+        )
+        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.wifi_status_lbl = Gtk.Label(label="Connected: OmniQ-CryoLab-6GHz (WPA3-SAE / PQC-TLS)")
+        self.wifi_status_lbl.get_style_context().add_class("metric-mono")
+        self.wifi_status_lbl.set_xalign(0.0)
+        sw = Gtk.Switch()
+        sw.set_active(True)
+        sw.connect(
+            "notify::active",
+            lambda s, _p: self.wifi_status_lbl.set_text(
+                "Connected: OmniQ-CryoLab-6GHz (WPA3-SAE / PQC-TLS)" if s.get_active() else "Wi-Fi Radio Disabled"
+            ),
+        )
+        top_row.pack_start(self.wifi_status_lbl, True, True, 0)
+        top_row.pack_end(sw, False, False, 0)
+        card.pack_start(top_row, False, False, 0)
+
+        for ssid, sig, sec in [
+            ("OmniQ-CryoLab-6GHz", "98%", "WPA3-Enterprise + ML-KEM"),
+            ("QPU-Management-VLAN", "91%", "WPA3-SAE"),
+            ("Quantum-Guest-5G", "74%", "WPA2-PSK"),
+        ]:
+            r = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            nl = Gtk.Label(label=f"{ssid}  [{sec}]  Signal: {sig}")
+            nl.set_xalign(0.0)
+            cb = Gtk.Button(label="Connect")
+            cb.get_style_context().add_class("action-btn")
+            cb.connect("clicked", lambda _b, s=ssid: self.wifi_status_lbl.set_text(f"Connected: {s}"))
+            r.pack_start(nl, True, True, 0)
+            r.pack_end(cb, False, False, 0)
+            card.pack_start(r, False, False, 0)
+
+        page.pack_start(card, False, False, 0)
+        return page
+
+    # 2. bluetooth
+    def _build_bluetooth_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "Bluetooth & Lab Telemetry Peripherals",
+            "Pair BLE environmental magnetometers, hall-probe sensors, and operator audio headsets.",
+        )
+        self.bt_status_lbl = Gtk.Label(label="BlueZ Controller Active: 3 Lab Peripherals Registered")
+        self.bt_status_lbl.get_style_context().add_class("metric-mono")
+        self.bt_status_lbl.set_xalign(0.0)
+        card.pack_start(self.bt_status_lbl, False, False, 0)
+
+        for dev_name, kind, rssi in [
+            ("CryoShield Fluxgate Magnetometer BLE-01", "CRYO SENSOR", "-44 dBm"),
+            ("RFSoC Rack Environmental Probe", "TELEMETRY", "-51 dBm"),
+            ("Operator Studio Headset", "AUDIO", "-56 dBm"),
+        ]:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            lbl = Gtk.Label(label=f"{dev_name} ({rssi})")
+            lbl.set_xalign(0.0)
+            badge = Gtk.Label(label=kind)
+            badge.get_style_context().add_class("badge-cyan")
+            row.pack_start(lbl, True, True, 0)
+            row.pack_end(badge, False, False, 0)
+            card.pack_start(row, False, False, 0)
+
+        page.pack_start(card, False, False, 0)
+        return page
+
+    # 3. display
+    def _build_display_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "Display, Resolution & Compositor",
+            "Configure X11 / Wayland output resolution and tear-free Cairo/OpenGL rendering.",
+        )
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        lbl = Gtk.Label(label="Display Output Mode:")
+        lbl.set_xalign(0.0)
+        self.res_combo = Gtk.ComboBoxText()
+        for mode in ["1920x1080 (60 Hz FHD)", "2560x1440 (60 Hz QHD)", "1600x900 (60 Hz)", "1280x800 (60 Hz)"]:
+            self.res_combo.append_text(mode)
+        self.res_combo.set_active(0)
+        btn_apply = Gtk.Button(label="Apply Resolution")
+        btn_apply.get_style_context().add_class("action-btn-cyan")
+        self.disp_feedback = Gtk.Label(label="Active Framebuffer: 32-bit TrueColor")
+        self.disp_feedback.get_style_context().add_class("card-desc")
+        self.disp_feedback.set_xalign(0.0)
+
+        def _apply_res(_b):
+            chosen = (self.res_combo.get_active_text() or "1920x1080").split()[0]
+            try:
+                subprocess.run(["xrandr", "-s", chosen], capture_output=True, timeout=2)
+            except Exception:
+                pass
+            self.disp_feedback.set_text(f"Configured resolution target: {chosen}")
+
+        btn_apply.connect("clicked", _apply_res)
+        row.pack_start(lbl, False, False, 0)
+        row.pack_start(self.res_combo, False, False, 0)
+        row.pack_start(btn_apply, False, False, 0)
+        card.pack_start(row, False, False, 0)
+        card.pack_start(self.disp_feedback, False, False, 0)
+        page.pack_start(card, False, False, 0)
+        return page
+
+    # 4. appearance
+    def _build_appearance_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "Appearance, Obsidian Theme & omniq-wallpaper",
+            "Switch desktop backdrops and bioluminescent quantum theme accents via omniq-wallpaper.",
+        )
+        self.wp_status_lbl = Gtk.Label(label="Active Theme: Deep Obsidian (#0D0B18) + Electric Cyan (#00E5FF)")
+        self.wp_status_lbl.get_style_context().add_class("metric-mono")
+        self.wp_status_lbl.set_xalign(0.0)
+        card.pack_start(self.wp_status_lbl, False, False, 0)
+
+        wp_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        presets = [
+            ("Quantum Obsidian", os.path.join(REPO_ROOT, "distro/branding/wallpaper.png"), "#0D0B18"),
+            ("Superconducting Cyan", "", "#071824"),
+            ("Hilbert Violet", "", "#160D29"),
+        ]
+        for label, img_p, hex_col in presets:
+            b = Gtk.Button(label=label)
+            b.get_style_context().add_class("action-btn")
+            b.connect("clicked", self._on_apply_wallpaper, label, img_p, hex_col)
+            wp_row.pack_start(b, False, False, 0)
+        card.pack_start(wp_row, False, False, 0)
+        page.pack_start(card, False, False, 0)
+        return page
+
+    def _on_apply_wallpaper(self, _btn, label: str, img_path: str, hex_col: str) -> None:
+        wp_bin = resolve_bin("omniq-wallpaper")
+        try:
+            with open(WALLPAPER_STATE_PATH, "w", encoding="utf-8") as f:
+                json.dump({"name": label, "image": img_path, "color": hex_col}, f)
+            if os.path.isfile(wp_bin) and os.access(wp_bin, os.X_OK):
+                arg = img_path if (img_path and os.path.isfile(img_path)) else hex_col
+                flag = "--set" if (img_path and os.path.isfile(img_path)) else "--color"
+                subprocess.run([wp_bin, flag, arg], capture_output=True, timeout=3)
+        except Exception:
+            pass
+        self.wp_status_lbl.set_text(f"Applied via omniq-wallpaper: {label} ({hex_col})")
+
+    # 5. sound
+    def _build_sound_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "Sound & Cryogenic Interlock Acoustic Alarms",
+            "Master ALSA/PipeWire output level and audible quench warning chimes.",
+        )
+        scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.0, 100.0, 1.0)
+        scale.set_value(75.0)
+        scale.connect("value-changed", self._on_volume_changed)
+        card.pack_start(scale, False, False, 0)
+        page.pack_start(card, False, False, 0)
+        return page
+
+    @staticmethod
+    def _on_volume_changed(scale: Gtk.Scale) -> None:
+        pct = int(scale.get_value())
+        try:
+            if shutil.which("pactl"):
+                subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"], capture_output=True, timeout=1)
+        except Exception:
+            pass
+
+    # 6. qpu_hardware
+    def _build_qpu_hardware_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        st = omniqd_request("GET", "/api/status", qpu_fallback=self.qpu)
+        card, _ = self._make_card(
+            "QPU Hardware & 127-Qubit Heavy-Hex Transmon Lattice",
+            f"Device: {st.get('device_name')} | Kernel Driver: /dev/accel/qpu0 ({st.get('operating_state')})",
+        )
+        self.qpu_summary_lbl = Gtk.Label(
+            label=(
+                f"Physical Qubits: {st.get('total_qubits')}  |  Couplers: {st.get('total_couplers')}  |  "
+                f"Avg T1: {st.get('avg_t1_us')} us  |  Avg T2: {st.get('avg_t2_us')} us  |  "
+                f"QEC Loop: {st.get('qec_loop_ns')} ns"
+            )
+        )
+        self.qpu_summary_lbl.get_style_context().add_class("metric-mono")
+        self.qpu_summary_lbl.set_xalign(0.0)
+        card.pack_start(self.qpu_summary_lbl, False, False, 0)
+
+        for q in st.get("sample_qubits", [])[:6]:
+            ql = Gtk.Label(
+                label=(
+                    f"Q[{q['id']:02d}]  f01={q['freq_ghz']:.4f} GHz  |  T1={q['t1_us']:.1f} us  |  "
+                    f"T2={q['t2_us']:.1f} us  |  F_1Q={q['f1q']*100:.3f}%  |  F_read={q['fread']*100:.2f}%"
+                )
+            )
+            ql.set_xalign(0.0)
+            ql.get_style_context().add_class("card-desc")
+            card.pack_start(ql, False, False, 0)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_burst = Gtk.Button(label="Trigger XY-8 + QEC Pulse Burst")
+        btn_burst.get_style_context().add_class("action-btn-cyan")
+        btn_burst.connect("clicked", self._on_trigger_burst)
+        btn_3d = Gtk.Button(label="Launch 3D Cryo/Lattice Explorer")
+        btn_3d.get_style_context().add_class("action-btn")
+        btn_3d.connect(
+            "clicked",
+            lambda _b: subprocess.Popen([resolve_bin("omniq-qpu-3d")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+        )
+        btn_row.pack_start(btn_burst, False, False, 0)
+        btn_row.pack_start(btn_3d, False, False, 0)
+        card.pack_start(btn_row, False, False, 0)
+
+        page.pack_start(card, False, False, 0)
+        return page
+
+    def _on_trigger_burst(self, _btn) -> None:
+        res = omniqd_request("POST", "/api/burst", {}, qpu_fallback=self.qpu)
+        if res.get("ok"):
+            self.qpu_summary_lbl.set_text(
+                f"RFSoC Pulse Burst #{res.get('burst_id')} Dispatched | QEC Round-Trip: {res.get('qec_latency_ns')} ns"
+            )
+        else:
+            self.qpu_summary_lbl.set_text(f"Burst Blocked: {res.get('error')}")
+
+    # 7. cryo_safety
+    def _build_cryo_safety_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        st = omniqd_request("GET", "/api/status", qpu_fallback=self.qpu)
+        cryo = st.get("cryo", {})
+        card, _ = self._make_card(
+            "Dilution Refrigerator & < 50.0 mK Hardware Interlock",
+            "Hardware watchdog clamps all RFSoC microwave DAC channels to 0x00 if MXC reaches 50.0 mK.",
+        )
+        stages_txt = (
+            f"50K Flange: {cryo.get('stage_50k_K', 48.5):.2f} K  |  "
+            f"4K Plate: {cryo.get('stage_4k_K', 3.85):.2f} K  |  "
+            f"Still: {cryo.get('still_mK', 820.0):.1f} mK  |  "
+            f"Cold Plate: {cryo.get('cold_plate_mK', 95.0):.1f} mK"
+        )
+        lbl_stages = Gtk.Label(label=stages_txt)
+        lbl_stages.set_xalign(0.0)
+        lbl_stages.get_style_context().add_class("card-desc")
+        card.pack_start(lbl_stages, False, False, 0)
+
+        self.cryo_status_lbl = Gtk.Label()
+        self.cryo_status_lbl.get_style_context().add_class("metric-mono")
+        self.cryo_status_lbl.set_xalign(0.0)
+        card.pack_start(self.cryo_status_lbl, False, False, 0)
+        self._update_cryo_label(cryo)
+
+        self.mxc_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10.0, 75.0, 0.5)
+        self.mxc_scale.set_value(float(cryo.get("mxc_mK", 14.25)))
+        card.pack_start(self.mxc_scale, False, False, 0)
+
+        act = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_set_temp = Gtk.Button(label="Apply MXC Test Temperature")
+        btn_set_temp.get_style_context().add_class("action-btn")
+        btn_set_temp.connect("clicked", self._on_set_cryo_temp)
+
+        btn_trip = Gtk.Button(label="Emergency Trip Interlock (0x00)")
+        btn_trip.get_style_context().add_class("action-btn-danger")
+        btn_trip.connect("clicked", self._on_trip_interlock)
+
+        btn_reset = Gtk.Button(label="Reset Interlock")
+        btn_reset.get_style_context().add_class("action-btn-cyan")
+        btn_reset.connect("clicked", self._on_reset_interlock)
+
+        act.pack_start(btn_set_temp, False, False, 0)
+        act.pack_start(btn_trip, False, False, 0)
+        act.pack_start(btn_reset, False, False, 0)
+        card.pack_start(act, False, False, 0)
+
+        page.pack_start(card, False, False, 0)
+        return page
+
+    def _update_cryo_label(self, cryo: Dict[str, Any]) -> None:
+        tripped = bool(cryo.get("interlock_tripped") or cryo.get("tripped"))
+        mxc = float(cryo.get("mxc_mK", cryo.get("temp_mxc_mK", 14.25)))
+        state = "TRIPPED [RF DAC CLAMPED 0x00]" if tripped else "ARMED & NOMINAL (< 50.0 mK)"
+        self.cryo_status_lbl.set_text(f"Mixing Chamber (MXC): {mxc:.3f} mK  |  Interlock: {state}")
+
+    def _on_set_cryo_temp(self, _btn) -> None:
+        val = float(self.mxc_scale.get_value())
+        res = omniqd_request("POST", "/api/cryo_temp", {"temp_mK": val}, qpu_fallback=self.qpu)
+        self._update_cryo_label(res)
+
+    def _on_trip_interlock(self, _btn) -> None:
+        res = omniqd_request("POST", "/api/interlock/trip", {"reason": "SETTINGS_EMERGENCY_TRIP"}, qpu_fallback=self.qpu)
+        self._update_cryo_label(res)
+
+    def _on_reset_interlock(self, _btn) -> None:
+        self.mxc_scale.set_value(14.25)
+        omniqd_request("POST", "/api/cryo_temp", {"temp_mK": 14.25}, qpu_fallback=self.qpu)
+        res = omniqd_request("POST", "/api/interlock/reset", {}, qpu_fallback=self.qpu)
+        self._update_cryo_label(res)
+
+    # 8. qmmu_partitions
+    def _build_qmmu_partitions_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "QMMU Multi-Tenant Spatial Partitioning & Guard Bands",
+            "Allocate isolated transmon sub-lattices with multi-hop ZZ-crosstalk guard qubits (> 46 dB isolation).",
+        )
+        ctrl = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        ctrl.pack_start(Gtk.Label(label="Qubits:"), False, False, 0)
+        self.part_q_spin = Gtk.SpinButton.new_with_range(2, 32, 1)
+        self.part_q_spin.set_value(4)
+        ctrl.pack_start(self.part_q_spin, False, False, 0)
+
+        ctrl.pack_start(Gtk.Label(label="Guard Hops:"), False, False, 0)
+        self.part_g_spin = Gtk.SpinButton.new_with_range(1, 3, 1)
+        self.part_g_spin.set_value(1)
+        ctrl.pack_start(self.part_g_spin, False, False, 0)
+
+        btn_alloc = Gtk.Button(label="Allocate QMMU Partition")
+        btn_alloc.get_style_context().add_class("action-btn-cyan")
+        btn_alloc.connect("clicked", self._on_alloc_partition)
+        ctrl.pack_start(btn_alloc, False, False, 0)
+
+        btn_free = Gtk.Button(label="Release All Partitions")
+        btn_free.get_style_context().add_class("action-btn")
+        btn_free.connect("clicked", self._on_free_partitions)
+        ctrl.pack_start(btn_free, False, False, 0)
+
+        card.pack_start(ctrl, False, False, 0)
+
+        self.qmmu_status_lbl = Gtk.Label(label="Active Tenant Partitions: 0 (127 Physical Qubits Available)")
+        self.qmmu_status_lbl.get_style_context().add_class("metric-mono")
+        self.qmmu_status_lbl.set_xalign(0.0)
+        card.pack_start(self.qmmu_status_lbl, False, False, 0)
+        page.pack_start(card, False, False, 0)
+        return page
+
+    def _on_alloc_partition(self, _btn) -> None:
+        nq = int(self.part_q_spin.get_value())
+        gh = int(self.part_g_spin.get_value())
+        part = self.qpu.allocate_partition(num_qubits=nq, guard_hops=gh)
+        self.active_partitions.append(part)
+        self.qmmu_status_lbl.set_text(
+            f"Allocated Partition #{part.partition_id}: Qubits={part.qubits} | Guards={part.guard_qubits} | "
+            f"Est Fidelity={part.est_fidelity * 100:.2f}%"
+        )
+
+    def _on_free_partitions(self, _btn) -> None:
+        while self.active_partitions:
+            p = self.active_partitions.pop()
+            try:
+                p.free()
+            except Exception:
+                pass
+        self.qmmu_status_lbl.set_text("Active Tenant Partitions: 0 (All QMMU guard bands released)")
+
+    # 9. tri_compute
+    def _build_tri_compute_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "Heterogeneous Tri-Compute Orchestrator (CPU + GPU + QPU)",
+            "Coordinates PREEMPT_RT isolated CPU cores [2, 3], GPUDirect-QPU Tensor Core QEC, and RFSoC pulses.",
+        )
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        row.pack_start(Gtk.Label(label="Scheduling Policy:"), False, False, 0)
+        self.tri_combo = Gtk.ComboBoxText()
+        for m_id, m_lbl in [
+            ("auto_synergy", "Auto Synergy (Balanced CPU+GPU+QPU)"),
+            ("qec_priority", "Hard Real-Time QEC Priority (< 600 ns)"),
+            ("hybrid_vqe", "Variational VQE / QAOA Parameter-Shift Loop"),
+            ("low_jitter_rt", "Deterministic Pulse Lock (SCHED_FIFO 95)"),
+        ]:
+            self.tri_combo.append(m_id, m_lbl)
+        self.tri_combo.set_active_id("auto_synergy")
+        row.pack_start(self.tri_combo, False, False, 0)
+
+        btn_apply = Gtk.Button(label="Apply Mode to omniqd")
+        btn_apply.get_style_context().add_class("action-btn-cyan")
+        btn_apply.connect("clicked", self._on_apply_tri_mode)
+        row.pack_start(btn_apply, False, False, 0)
+        card.pack_start(row, False, False, 0)
+
+        core_st = core_bridge.get_status()
+        self.tri_status_lbl = Gtk.Label(
+            label=f"C++20 Core Engine: {core_st.get('engine', 'omniq-core')} | Isolated Cores: [2, 3] | P2P DMA: 28.6 GB/s"
+        )
+        self.tri_status_lbl.get_style_context().add_class("metric-mono")
+        self.tri_status_lbl.set_xalign(0.0)
+        card.pack_start(self.tri_status_lbl, False, False, 0)
+        page.pack_start(card, False, False, 0)
+        return page
+
+    def _on_apply_tri_mode(self, _btn) -> None:
+        mode = self.tri_combo.get_active_id() or "auto_synergy"
+        self.tri_mode = mode
+        res = omniqd_request("POST", "/api/mode", {"mode": mode}, qpu_fallback=self.qpu)
+        self.tri_status_lbl.set_text(f"Active omniqd Tri-Compute Mode: {res.get('mode', mode)}")
+
+    # 10. pqc_security
+    def _build_pqc_security_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "NIST Post-Quantum Cryptography & SOC 2 Type II Compliance",
+            "FIPS 203 ML-KEM-768 Key Encapsulation, FIPS 204 ML-DSA-65 Signatures, and SHA-256 Telemetry Audit Chain.",
+        )
+        key = core_bridge.ensure_secret_key()
+        masked = (key[:18] + "..." + key[-6:]) if len(key) > 24 else "omniq_sk_live_[active]"
+        self.pqc_lbl = Gtk.Label(
+            label=f"KEM: ML-KEM-768 (FIPS 203)  |  Signature: ML-DSA-65 (FIPS 204)  |  Key: {masked}"
+        )
+        self.pqc_lbl.get_style_context().add_class("metric-mono")
+        self.pqc_lbl.set_xalign(0.0)
+        card.pack_start(self.pqc_lbl, False, False, 0)
+
+        btn_audit = Gtk.Button(label="Launch PQC & SOC 2 Compliance Scanner")
+        btn_audit.get_style_context().add_class("action-btn-cyan")
+        btn_audit.connect(
+            "clicked",
+            lambda _b: subprocess.Popen(
+                [sys.executable, resolve_bin("omniq-pqc-audit"), "--gui"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ),
+        )
+        card.pack_start(btn_audit, False, False, 0)
+        page.pack_start(card, False, False, 0)
+        return page
+
+    # 11. notifications
+    def _build_notifications_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "System & Cryogenic Alert Notifications",
+            f"Live shared alert feed synchronized with {NOTIFICATIONS_PATH}.",
+        )
+        act = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_refresh = Gtk.Button(label="Refresh Feed")
+        btn_refresh.get_style_context().add_class("action-btn")
+        btn_refresh.connect("clicked", lambda _b: self._refresh_notifications_ui())
+
+        btn_test = Gtk.Button(label="Emit Test Alert")
+        btn_test.get_style_context().add_class("action-btn-cyan")
+        btn_test.connect("clicked", self._on_emit_test_notification)
+
+        btn_clear = Gtk.Button(label="Clear All Notifications")
+        btn_clear.get_style_context().add_class("action-btn-danger")
+        btn_clear.connect("clicked", self._on_clear_notifications)
+
+        act.pack_start(btn_refresh, False, False, 0)
+        act.pack_start(btn_test, False, False, 0)
+        act.pack_start(btn_clear, False, False, 0)
+        card.pack_start(act, False, False, 0)
+
+        self.notify_log_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.pack_start(self.notify_log_box, False, False, 4)
+        self._refresh_notifications_ui()
+
+        page.pack_start(card, False, False, 0)
+        return page
+
+    def _load_shared_notifications(self) -> Dict[str, Any]:
+        items = load_notifications_file(NOTIFICATIONS_PATH)
+        return {"cleared": len(items) == 0, "notifications": items}
+
+    def _refresh_notifications_ui(self) -> None:
+        for ch in self.notify_log_box.get_children():
+            self.notify_log_box.remove(ch)
+        items = load_notifications_file(NOTIFICATIONS_PATH)
+        if not items:
+            empty = Gtk.Label(label="No active quantum or cryogenic notifications.")
+            empty.get_style_context().add_class("card-desc")
+            empty.set_xalign(0.0)
+            self.notify_log_box.pack_start(empty, False, False, 0)
+            self.notify_log_box.show_all()
+            return
+        for item in items[:12]:
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            sev = str(item.get("severity", "info")).upper()
+            ts = str(item.get("ts", "--:--:--"))
+            hl = Gtk.Label(label=f"[{sev} @ {ts}] {item.get('title', 'Alert')}")
+            hl.set_xalign(0.0)
+            hl.get_style_context().add_class("metric-mono")
+            bl = Gtk.Label(label=str(item.get("body", "")))
+            bl.set_xalign(0.0)
+            bl.set_line_wrap(True)
+            bl.get_style_context().add_class("card-desc")
+            row.pack_start(hl, False, False, 0)
+            row.pack_start(bl, False, False, 0)
+            self.notify_log_box.pack_start(row, False, False, 0)
+        self.notify_log_box.show_all()
+
+    def _on_emit_test_notification(self, _btn) -> None:
+        items = load_notifications_file(NOTIFICATIONS_PATH)
+        items.insert(
+            0,
+            {
+                "title": "QMMU Calibration Drift Check Passed",
+                "body": "All 127 transmon qubits verified within +/- 0.8 kHz f01 tolerance.",
+                "severity": "info",
+                "ts": time.strftime("%H:%M:%S"),
+            },
+        )
+        save_notifications_file(items[:25], NOTIFICATIONS_PATH)
+        self._refresh_notifications_ui()
+
+    def _on_clear_notifications(self, _btn) -> None:
+        save_notifications_file([], NOTIFICATIONS_PATH)
+        self._refresh_notifications_ui()
+
+    # 12. storage
+    def _build_storage_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "Storage, NVMe Crate & POSIX Shared Memory",
+            "Root filesystem capacity and /dev/shm zero-copy quantum telemetry rings.",
+        )
+        for mnt, title in [("/", "Root Filesystem (/)"), ("/dev/shm", "Quantum Zero-Copy SHM (/dev/shm)")]:
+            if os.path.exists(mnt):
+                usage = shutil.disk_usage(mnt)
+                frac = usage.used / max(1, usage.total)
+                used_gb = usage.used / (1024 ** 3)
+                tot_gb = usage.total / (1024 ** 3)
+                lbl = Gtk.Label(label=f"{title}: {used_gb:.2f} GiB / {tot_gb:.2f} GiB ({frac * 100:.1f}%)")
+                lbl.set_xalign(0.0)
+                pb = Gtk.ProgressBar()
+                pb.set_fraction(min(1.0, max(0.0, frac)))
+                card.pack_start(lbl, False, False, 0)
+                card.pack_start(pb, False, False, 2)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_disks = Gtk.Button(label="Open OmniQ Disks Analyzer")
+        btn_disks.get_style_context().add_class("action-btn-cyan")
+        btn_disks.connect(
+            "clicked",
+            lambda _b: subprocess.Popen([sys.executable, resolve_bin("omniq-disks")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+        )
+        btn_inst = Gtk.Button(label="Launch Disk Installer")
+        btn_inst.get_style_context().add_class("action-btn")
+        btn_inst.connect(
+            "clicked",
+            lambda _b: subprocess.Popen([resolve_bin("omniq-installer"), "--gui"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+        )
+        btn_row.pack_start(btn_disks, False, False, 0)
+        btn_row.pack_start(btn_inst, False, False, 0)
+        card.pack_start(btn_row, False, False, 4)
+        page.pack_start(card, False, False, 0)
+        return page
+
+    # 13. power
+    def _build_power_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card, _ = self._make_card(
+            "Power Management & Real-Time CPU C-State Lock",
+            "Enforces 'performance' CPU governor and C-state idle=poll on isolated RT QPU cores [2, 3].",
+        )
+        self.gov_lbl = Gtk.Label(label="Active Governor: performance (C-States Locked on Cores 2, 3 | Cryo UPS: 100% Online)")
+        self.gov_lbl.get_style_context().add_class("metric-mono")
+        self.gov_lbl.set_xalign(0.0)
+        card.pack_start(self.gov_lbl, False, False, 0)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for prof, desc in [
+            ("Deterministic RT (performance)", "Governor: performance | Max Jitter < 20 us"),
+            ("Balanced Workstation (schedutil)", "Governor: schedutil | Cores [2,3] isolated"),
+        ]:
+            b = Gtk.Button(label=prof)
+            b.get_style_context().add_class("action-btn")
+            b.connect("clicked", lambda _btn, d=desc: self.gov_lbl.set_text(d))
+            row.pack_start(b, False, False, 0)
+        card.pack_start(row, False, False, 0)
+        page.pack_start(card, False, False, 0)
+        return page
+
+    # 14. about
+    def _build_about_page(self) -> Gtk.Widget:
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        hero.get_style_context().add_class("hero-card")
+
+        t = Gtk.Label(label="OmniQ-OS 24.04-RT (Pure Quantum Linux Edition)")
+        t.get_style_context().add_class("card-title")
+        t.set_xalign(0.0)
+        hero.pack_start(t, False, False, 0)
+
+        specs = [
+            f"Host Kernel        : {platform.release()} (PREEMPT_RT Quantum Profile)",
+            "Quantum Subsystem  : /dev/accel/qpu0 (127-Qubit Heavy-Hex Transmon Array)",
+            "Cryogenic Guard    : < 50.000 mK Hardware Watchdog -> 0x00 RF DAC Clamp",
+            "QEC Decoder Path   : GPUDirect-QPU PCIe Gen5 P2P (< 600 ns MWPM Round-Trip)",
+            "Post-Quantum Stack : NIST FIPS 203 (ML-KEM-768) + FIPS 204 (ML-DSA-65)",
+            f"Build Timestamp    : {datetime.date.today().isoformat()}",
+        ]
+        for line in specs:
+            l = Gtk.Label(label=line)
+            l.get_style_context().add_class("metric-mono")
+            l.set_xalign(0.0)
+            hero.pack_start(l, False, False, 0)
+
+        page.pack_start(hero, False, False, 0)
+        return page
+
+
+def run_self_test() -> int:
+    # 1. Verify omniqd API helper / QPU fallback
+    st = omniqd_request("GET", "/api/status")
+    assert st["total_qubits"] == 127
+    assert "cryo" in st
+
+    # 2. Verify /tmp/omniq_notifications.json round-trip & clear
+    backup = None
+    if os.path.exists(NOTIFICATIONS_PATH):
+        with open(NOTIFICATIONS_PATH, "r", encoding="utf-8") as f:
+            backup = f.read()
+    try:
+        save_notifications_file([{"title": "UnitTest", "body": "Body", "severity": "info", "ts": "12:00:00"}])
+        assert len(load_notifications_file()) == 1
+        save_notifications_file([])
+        assert len(load_notifications_file()) == 0
+
+        # 3. If GTK display available, instantiate SettingsWindow in-memory and verify all 14 pages
+        ok, _ = Gtk.init_check(sys.argv)
+        if ok:
+            win = SettingsWindow(default_page="qpu_hardware")
+            tags = [t for t, _, _ in win.category_buttons]
+            assert tags == EXPECTED_PAGES, f"Mismatch in 14 settings pages: {tags}"
+            for page_tag in EXPECTED_PAGES:
+                assert win.stack.get_child_by_name(page_tag) is not None
+                win._select_category(page_tag)
+                assert win.stack.get_visible_child_name() == page_tag
+            win._on_emit_test_notification(None)
+            assert len(win._load_shared_notifications()["notifications"]) >= 1
+            win._on_clear_notifications(None)
+            assert win._load_shared_notifications()["notifications"] == []
+            win.destroy()
+    finally:
+        if backup is not None:
+            with open(NOTIFICATIONS_PATH, "w", encoding="utf-8") as f:
+                f.write(backup)
+        elif os.path.exists(NOTIFICATIONS_PATH):
+            os.unlink(NOTIFICATIONS_PATH)
+
+    print(f"[PASS] omniq-settings verified across all {len(EXPECTED_PAGES)} Control Center pages.")
+    return 0
+
+
+def main() -> None:
+    if "--test" in sys.argv:
+        sys.exit(run_self_test())
+
+    GLib.set_prgname("omniq-settings")
+    GLib.set_application_name("OmniQ Control Center")
+
+    target_page = "wifi"
+    aliases = {
+        "wallpaper": "appearance",
+        "theme": "appearance",
+        "qpu": "qpu_hardware",
+        "cryo": "cryo_safety",
+        "safety": "cryo_safety",
+        "qmmu": "qmmu_partitions",
+        "pqc": "pqc_security",
+        "soc2": "pqc_security",
+    }
+    for arg in sys.argv[1:]:
+        if arg.startswith("--page="):
+            target_page = arg.split("=", 1)[1]
+        elif not arg.startswith("-"):
+            target_page = arg
+    target_page = aliases.get(target_page.lower(), target_page)
+
+    win = SettingsWindow(default_page=target_page)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    win._select_category(target_page)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

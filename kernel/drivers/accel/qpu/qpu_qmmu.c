@@ -131,34 +131,47 @@ int qpu_qmmu_alloc(struct qpu_device *qdev, struct qpu_alloc_request *req, __u32
 		alloc_list[alloc_count++] = candidate_start + j;
 	}
 
-	/* Compute crosstalk guard band (1-hop boundary qubits) */
+	/* Compute crosstalk guard band (multi-hop BFS boundary qubits) */
 	if (req->guard_band_hops > 0) {
-		for (i = 0; i < alloc_count; i++) {
-			__u16 neighbors[8];
-			int num_nb = get_neighbors(qdev, alloc_list[i], neighbors, 8);
+		__u16 frontier[QPU_MAX_QUBITS];
+		int f_start = 0, f_end = 0;
+		int hop;
 
-			for (j = 0; j < num_nb; j++) {
-				__u16 nb = neighbors[j];
-				bool is_allocated = false;
-				bool already_guarded = false;
+		for (i = 0; i < alloc_count; i++)
+			frontier[f_end++] = alloc_list[i];
 
-				for (k = 0; k < alloc_count; k++) {
-					if (alloc_list[k] == nb) {
-						is_allocated = true;
-						break;
+		for (hop = 0; hop < req->guard_band_hops; hop++) {
+			int level_end = f_end;
+			while (f_start < level_end) {
+				__u16 cur = frontier[f_start++];
+				__u16 neighbors[8];
+				int num_nb = get_neighbors(qdev, cur, neighbors, 8);
+
+				for (j = 0; j < num_nb; j++) {
+					__u16 nb = neighbors[j];
+					bool is_allocated = false;
+					bool already_guarded = false;
+
+					for (k = 0; k < alloc_count; k++) {
+						if (alloc_list[k] == nb) {
+							is_allocated = true;
+							break;
+						}
 					}
-				}
-				if (is_allocated)
-					continue;
+					if (is_allocated)
+						continue;
 
-				for (k = 0; k < guard_count; k++) {
-					if (guard_list[k] == nb) {
-						already_guarded = true;
-						break;
+					for (k = 0; k < guard_count; k++) {
+						if (guard_list[k] == nb) {
+							already_guarded = true;
+							break;
+						}
 					}
-				}
-				if (!already_guarded && guard_count < QPU_MAX_PARTITION_Q) {
-					guard_list[guard_count++] = nb;
+					if (!already_guarded && guard_count < QPU_MAX_PARTITION_Q) {
+						guard_list[guard_count++] = nb;
+						if (f_end < QPU_MAX_QUBITS)
+							frontier[f_end++] = nb;
+					}
 				}
 			}
 		}

@@ -1,0 +1,842 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""
+OmniQ-OS Step-by-Step Quantum State & Noise Debugger (bin/omniq-debugger)
+- PyGObject GTK3 + Antialiased Cairo Quantum Execution Debugger
+- Target binary for OmniQDebuggerBridge.launch() and Circuit.debug()
+- Gate-by-gate forward/backward stepping, NoiseModel toggles (Depolarizing + T1/T2 Relaxation),
+  Statevector/DensityMatrix amplitude spectrum, Reduced Bloch Spheres, and Hilbert Space launcher
+"""
+
+from __future__ import annotations
+
+import colorsys
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import numpy as np
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+for _p in reversed([
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    "/opt/omniq/src",
+    "/usr/lib/python3/dist-packages",
+]):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from omniq.circuit import Circuit, DensityMatrix, Statevector
+from omniq.noise import NoiseModel
+
+IPC_HILBERT_PATH = "/tmp/omniq_hilbert_state.json"
+
+DARK_CSS = b"""
+window, .main-bg {
+    background-color: #0D0B18;
+    color: #ECF2FF;
+    font-family: "DejaVu Sans", sans-serif;
+}
+.header-bar {
+    background: linear-gradient(to right, #110E22, #1A1530);
+    border-bottom: 1px solid rgba(0, 229, 255, 0.35);
+    padding: 8px 12px;
+}
+.panel-card {
+    background-color: #141126;
+    border: 1px solid rgba(138, 79, 255, 0.36);
+    border-radius: 8px;
+}
+button {
+    background-image: none;
+    background-color: #1A1530;
+    color: #E2E8F0;
+    border: 1px solid rgba(138, 79, 255, 0.42);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: bold;
+}
+button:hover {
+    background-color: #261E47;
+    border-color: #00E5FF;
+    color: #00E5FF;
+}
+button.accent-btn {
+    background: linear-gradient(135deg, #0E4B63, #008CA8);
+    border-color: #00E5FF;
+    color: #FFFFFF;
+}
+button.accent-btn:hover {
+    background: #00E5FF;
+    color: #0D0B18;
+}
+button.violet-btn {
+    background: linear-gradient(135deg, #2D1957, #5B28A8);
+    border-color: #8A4FFF;
+    color: #FFFFFF;
+}
+combobox button, spinbutton {
+    background-image: none;
+    background-color: #141126;
+    color: #ECF2FF;
+    border: 1px solid rgba(138, 79, 255, 0.42);
+    border-radius: 6px;
+}
+scale trough {
+    background-color: #211B3D;
+    border-radius: 4px;
+}
+scale highlight {
+    background: linear-gradient(to right, #8A4FFF, #00E5FF);
+    border-radius: 4px;
+}
+.title-lbl {
+    color: #00E5FF;
+    font-weight: bold;
+    font-size: 13px;
+}
+.sub-lbl {
+    color: #94A3B8;
+    font-size: 11px;
+}
+.metric-val {
+    color: #00FF9D;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    font-weight: bold;
+}
+.ket-view, .ket-view text {
+    background-color: #090812;
+    color: #ECF2FF;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+}
+dialog, filechooserdialog {
+    background-color: #0D0B18;
+    color: #ECF2FF;
+    border: 1px solid #8A4FFF;
+}
+"""
+
+
+def phase_to_rgb(phase_rad: float) -> Tuple[float, float, float]:
+    hue = ((phase_rad + math.pi) / (2.0 * math.pi)) % 1.0
+    return colorsys.hsv_to_rgb(hue, 0.85, 1.0)
+
+
+def load_debug_session(filepath: str) -> Tuple[Circuit, Optional[Dict[str, Any]], str]:
+    """Loads either an OpenQASM (.qasm) file or a Circuit.debug() JSON session."""
+    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        raw = f.read()
+
+    noise_cfg: Optional[Dict[str, Any]] = None
+    if filepath.lower().endswith(".json") or raw.lstrip().startswith("{"):
+        doc = json.loads(raw)
+        noise_cfg = doc.get("noise_model")
+        if isinstance(doc.get("qasm"), str) and doc["qasm"].strip():
+            qasm_str = doc["qasm"]
+            circ = Circuit.from_qasm(qasm_str)
+            return circ, noise_cfg, qasm_str
+        if isinstance(doc.get("gates"), list):
+            circ = Circuit(int(doc.get("num_qubits", 2)))
+            for g in doc["gates"]:
+                gt = str(g.get("type", "H")).upper()
+                q0 = int(g.get("qubit", 0))
+                if "control2" in g and "target" in g:
+                    circ.add_gate(gt, [q0, int(g["control2"]), int(g["target"])])
+                elif "target" in g:
+                    circ.add_gate(gt, [q0, int(g["target"])], angle=g.get("parameter"))
+                else:
+                    circ.add_gate(gt, [q0], angle=g.get("parameter"))
+            return circ, noise_cfg, circ.to_qasm("3.0")
+
+    circ = Circuit.from_qasm(raw)
+    return circ, None, raw
+
+
+class DebuggerSession:
+    """Headless-testable state machine for gate-by-gate stepping and Kraus noise evaluation."""
+
+    def __init__(self, circuit: Optional[Circuit] = None):
+        self.circuit: Circuit = circuit or Circuit(3).h(0).cx(0, 1).cx(1, 2)
+        self.step: int = len(self.circuit.gates)
+        self.depol_enabled: bool = False
+        self.depol_prob: float = 0.02
+        self.relax_enabled: bool = False
+        self.t1_us: float = 50.0
+        self.t2_us: float = 70.0
+
+    def set_circuit(self, circuit: Circuit, reset_to_start: bool = False) -> None:
+        self.circuit = circuit
+        self.step = 0 if reset_to_start else len(circuit.gates)
+
+    def apply_noise_dict(self, noise_dict: Optional[Dict[str, Any]]) -> None:
+        if not noise_dict:
+            return
+        for ch in noise_dict.get("channels", []):
+            if not ch:
+                continue
+            kind = str(ch[0]).upper()
+            if kind == "DEPOLARIZING" and len(ch) >= 2:
+                self.depol_enabled = True
+                self.depol_prob = float(ch[1])
+            elif kind == "RELAXATION" and len(ch) >= 3:
+                self.relax_enabled = True
+                self.t1_us = float(ch[1])
+                self.t2_us = float(ch[2])
+
+    def build_noise_model(self) -> Optional[NoiseModel]:
+        if not self.depol_enabled and not self.relax_enabled:
+            return None
+        nm = NoiseModel("Debugger Live Noise")
+        if self.depol_enabled and self.depol_prob > 0.0:
+            # Scale effective depolarizing rate with executed gate depth
+            depth_scale = max(1, self.step)
+            eff_p = 1.0 - ((1.0 - self.depol_prob) ** min(depth_scale, 20))
+            nm.add_depolarizing_noise(min(0.95, eff_p))
+        if self.relax_enabled:
+            nm.add_relaxation_noise(self.t1_us, self.t2_us)
+        return nm
+
+    def step_forward(self) -> int:
+        self.step = min(len(self.circuit.gates), self.step + 1)
+        return self.step
+
+    def step_backward(self) -> int:
+        self.step = max(0, self.step - 1)
+        return self.step
+
+    def reset_step(self) -> int:
+        self.step = 0
+        return self.step
+
+    def run_to_end(self) -> int:
+        self.step = len(self.circuit.gates)
+        return self.step
+
+    def evaluate(self) -> Dict[str, Any]:
+        pure_sv = self.circuit.execute(max_steps=self.step, noise_model=None)
+        assert isinstance(pure_sv, Statevector)
+        nm = self.build_noise_model()
+        noisy_or_pure: Union[Statevector, DensityMatrix] = (
+            self.circuit.execute(max_steps=self.step, noise_model=nm) if nm is not None else pure_sv
+        )
+        dm = noisy_or_pure if isinstance(noisy_or_pure, DensityMatrix) else pure_sv.to_density_matrix()
+        probs = dm.probabilities()
+        phases = pure_sv.phases()
+        bloch = [dm.bloch_vector(q) for q in range(min(self.circuit.num_qubits, 6))]
+
+        cur_gate_str = "Initial State |0...0>"
+        if 0 < self.step <= len(self.circuit.gates):
+            g = self.circuit.gates[self.step - 1]
+            cur_gate_str = f"Step {self.step}/{len(self.circuit.gates)}: {g[0]} {list(g[1:])}"
+
+        return {
+            "pure_sv": pure_sv,
+            "density_matrix": dm,
+            "probabilities": probs,
+            "phases": phases,
+            "purity": dm.purity(),
+            "vn_entropy": dm.von_neumann_entropy(),
+            "entanglement_entropy": pure_sv.entanglement_entropy(),
+            "bloch_vectors": bloch,
+            "gate_label": cur_gate_str,
+        }
+
+
+def draw_debugger_canvas(cr, width: float, height: float, session: DebuggerSession, state_info: Dict[str, Any]) -> None:
+    """Renders 3-zone Cairo debugger view: Gate Timeline + Amplitude Spectrum + Reduced Bloch Spheres."""
+    import cairo
+
+    cr.set_antialias(cairo.ANTIALIAS_BEST)
+    cr.set_source_rgb(0.05, 0.04, 0.10)
+    cr.rectangle(0, 0, width, height)
+    cr.fill()
+
+    circ = session.circuit
+    nq = min(circ.num_qubits, 6)
+
+    # 1. Top Panel (36%): Circuit Gate Timeline with Active Step Playhead
+    top_h = height * 0.36
+    cr.set_source_rgba(0.08, 0.07, 0.16, 0.95)
+    cr.rectangle(8, 8, width - 16, top_h - 12)
+    cr.fill()
+    cr.set_source_rgba(0.54, 0.31, 1.0, 0.45)
+    cr.set_line_width(1.0)
+    cr.rectangle(8, 8, width - 16, top_h - 12)
+    cr.stroke()
+
+    cr.set_source_rgb(0.0, 0.90, 1.0)
+    cr.set_font_size(11.0)
+    cr.move_to(18, 25)
+    cr.show_text(f"GATE TIMELINE STEPPER  —  {state_info['gate_label']}")
+
+    wire_y0 = 36.0
+    wire_span = max(50.0, top_h - 52.0)
+    dy = wire_span / max(1, nq)
+    x0 = 56.0
+    x1 = width - 24.0
+
+    for q in range(nq):
+        wy = wire_y0 + (q + 0.5) * dy
+        cr.set_source_rgb(0.75, 0.82, 0.95)
+        cr.set_font_size(9.5)
+        cr.move_to(16, wy + 3.5)
+        cr.show_text(f"q[{q}]")
+        cr.set_source_rgba(0.54, 0.31, 1.0, 0.40)
+        cr.move_to(x0, wy)
+        cr.line_to(x1, wy)
+        cr.stroke()
+
+    gates = circ.gates[:24]
+    if gates:
+        slot_w = (x1 - x0 - 20.0) / max(1, len(gates))
+        for i, g in enumerate(gates):
+            gt = g[0].upper()
+            gx = x0 + 14.0 + i * slot_w
+            executed = i < session.step
+            is_current = i == (session.step - 1)
+
+            if is_current:
+                cr.set_source_rgba(0.0, 1.0, 0.62, 0.18)
+                cr.rectangle(gx - slot_w * 0.45, wire_y0 - 4, slot_w * 0.9, wire_span + 8)
+                cr.fill()
+
+            q_primary = int(g[1])
+            if q_primary >= nq:
+                continue
+            yp = wire_y0 + (q_primary + 0.5) * dy
+
+            alpha = 0.95 if executed else 0.30
+            if gt in ("CNOT", "CX", "CZ", "CY", "CP", "CRZ", "SWAP", "ISWAP") and len(g) >= 3:
+                qt = int(g[2])
+                if qt < nq:
+                    yt = wire_y0 + (qt + 0.5) * dy
+                    cr.set_source_rgba(0.0, 1.0 if is_current else 0.90, 0.62 if is_current else 1.0, alpha)
+                    cr.set_line_width(2.0 if is_current else 1.4)
+                    cr.move_to(gx, yp)
+                    cr.line_to(gx, yt)
+                    cr.stroke()
+                    cr.arc(gx, yp, 3.6, 0, 2 * math.pi)
+                    cr.fill()
+                    cr.arc(gx, yt, 6.2, 0, 2 * math.pi)
+                    cr.stroke()
+                continue
+
+            bw = min(26.0, max(14.0, slot_w * 0.78))
+            bh = min(18.0, dy * 0.75)
+            if is_current:
+                cr.set_source_rgba(0.0, 0.85, 0.52, 0.95)
+            elif executed:
+                cr.set_source_rgba(0.08, 0.45, 0.68, 0.92)
+            else:
+                cr.set_source_rgba(0.16, 0.14, 0.28, 0.75)
+            cr.rectangle(gx - bw / 2.0, yp - bh / 2.0, bw, bh)
+            cr.fill()
+            cr.set_source_rgba(0.0, 0.90, 1.0, alpha)
+            cr.set_line_width(1.0)
+            cr.rectangle(gx - bw / 2.0, yp - bh / 2.0, bw, bh)
+            cr.stroke()
+
+            lbl = "M" if gt == "MEASURE" else gt[:3]
+            cr.set_source_rgba(1.0, 1.0, 1.0, alpha)
+            cr.set_font_size(8.5)
+            cr.move_to(gx - len(lbl) * 2.6, yp + 3.0)
+            cr.show_text(lbl)
+
+    # 2. Bottom-Left Panel (52% width): Computational Basis Probability & Phase Spectrum
+    bot_y = top_h + 4.0
+    bot_h = height - bot_y - 8.0
+    left_w = (width - 24.0) * 0.52
+
+    cr.set_source_rgba(0.08, 0.07, 0.16, 0.95)
+    cr.rectangle(8, bot_y, left_w, bot_h)
+    cr.fill()
+    cr.set_source_rgba(0.54, 0.31, 1.0, 0.45)
+    cr.rectangle(8, bot_y, left_w, bot_h)
+    cr.stroke()
+
+    cr.set_source_rgb(0.0, 1.0, 0.62)
+    cr.set_font_size(11.0)
+    cr.move_to(18, bot_y + 18)
+    cr.show_text("STATEVECTOR / DENSITY SPECTRUM (PHASE HUE)")
+
+    probs = state_info["probabilities"]
+    phases = state_info["phases"]
+    dim = len(probs)
+    indices = list(range(dim)) if dim <= 16 else sorted(list(np.argsort(probs)[::-1][:16]))
+    p_max = max(0.20, float(np.max(probs)))
+    bx0 = 20.0
+    bw_tot = left_w - 24.0
+    slot = bw_tot / max(1, len(indices))
+    by_bot = bot_y + bot_h - 22.0
+    bh_avail = max(40.0, bot_h - 54.0)
+
+    for pos, idx in enumerate(indices):
+        pr = float(probs[idx])
+        rc, gc, bc = phase_to_rgb(float(phases[idx]))
+        bh = (pr / p_max) * bh_avail
+        px = bx0 + pos * slot + 1.5
+        pw = max(3.0, slot - 3.0)
+        cr.set_source_rgba(rc, gc, bc, 0.92 if pr > 0.005 else 0.20)
+        cr.rectangle(px, by_bot - bh, pw, bh)
+        cr.fill()
+        if len(indices) <= 16 and slot >= 18:
+            bstr = format(int(idx), f"0{circ.num_qubits}b")[-4:]
+            cr.set_source_rgb(0.76, 0.82, 0.94)
+            cr.set_font_size(8.0)
+            cr.move_to(px, by_bot + 12)
+            cr.show_text(bstr)
+
+    # 3. Bottom-Right Panel (48% width): Reduced Single-Qubit Bloch Spheres
+    rx0 = 16.0 + left_w
+    rw = width - rx0 - 8.0
+    cr.set_source_rgba(0.08, 0.07, 0.16, 0.95)
+    cr.rectangle(rx0, bot_y, rw, bot_h)
+    cr.fill()
+    cr.set_source_rgba(0.54, 0.31, 1.0, 0.45)
+    cr.rectangle(rx0, bot_y, rw, bot_h)
+    cr.stroke()
+
+    cr.set_source_rgb(0.0, 0.90, 1.0)
+    cr.set_font_size(11.0)
+    cr.move_to(rx0 + 10, bot_y + 18)
+    cr.show_text("REDUCED BLOCH SPHERES & PURITY")
+
+    bvecs = state_info["bloch_vectors"]
+    cols = 2 if len(bvecs) <= 4 else 3
+    rows = math.ceil(len(bvecs) / cols)
+    cell_w = rw / max(1, cols)
+    cell_h = (bot_h - 28.0) / max(1, rows)
+
+    for q, (bx, by, bz, pur) in enumerate(bvecs):
+        r_i = q // cols
+        c_i = q % cols
+        scx = rx0 + (c_i + 0.5) * cell_w
+        scy = bot_y + 26.0 + (r_i + 0.46) * cell_h
+        rad = min(cell_w, cell_h) * 0.32
+
+        cr.set_source_rgba(0.54, 0.31, 1.0, 0.42)
+        cr.set_line_width(1.1)
+        cr.arc(scx, scy, rad, 0, 2 * math.pi)
+        cr.stroke()
+        cr.save()
+        cr.translate(scx, scy)
+        cr.scale(1.0, 0.34)
+        cr.arc(0, 0, rad, 0, 2 * math.pi)
+        cr.restore()
+        cr.stroke()
+
+        # Z axis
+        cr.set_source_rgba(0.6, 0.7, 0.85, 0.30)
+        cr.move_to(scx, scy - rad)
+        cr.line_to(scx, scy + rad)
+        cr.stroke()
+
+        # 3D isometric projection of (bx, by, bz)
+        vx = scx + (by - 0.45 * bx) * rad * 0.85
+        vy = scy - (bz - 0.30 * bx) * rad * 0.85
+        cr.set_source_rgb(0.0, 1.0, 0.62)
+        cr.set_line_width(2.2)
+        cr.move_to(scx, scy)
+        cr.line_to(vx, vy)
+        cr.stroke()
+        cr.arc(vx, vy, 3.8, 0, 2 * math.pi)
+        cr.fill()
+
+        cr.set_source_rgb(0.88, 0.93, 1.0)
+        cr.set_font_size(8.5)
+        cr.move_to(scx - rad, scy + rad + 12)
+        cr.show_text(f"q[{q}] z={bz:+.2f} P={pur:.2f}")
+
+
+def resolve_sibling_bin(name: str) -> str:
+    local = os.path.join(REPO_ROOT, "bin", name)
+    if os.path.isfile(local):
+        return local
+    for p in [f"/usr/local/bin/{name}", f"/usr/bin/{name}"]:
+        if os.path.isfile(p):
+            return p
+    return shutil.which(name) or local
+
+
+def launch_gui(initial_file: Optional[str] = None) -> None:
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, GLib, Gtk
+
+    GLib.set_prgname("omniq-debugger")
+    GLib.set_application_name("OmniQ Quantum Debugger")
+
+    gtk_settings = Gtk.Settings.get_default()
+    if gtk_settings is not None:
+        gtk_settings.set_property("gtk-application-prefer-dark-theme", True)
+
+    provider = Gtk.CssProvider()
+    provider.load_from_data(DARK_CSS)
+    screen = Gdk.Screen.get_default()
+    if screen is not None:
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+    class OmniQDebuggerWindow(Gtk.Window):
+        def __init__(self, start_path: Optional[str] = None):
+            super().__init__(title="OmniQ Quantum Debugger — Step-by-Step State & Kraus Noise Inspector")
+            self.set_default_size(1180, 720)
+            self.set_position(Gtk.WindowPosition.CENTER)
+
+            self.session = DebuggerSession()
+            self.source_qasm = self.session.circuit.to_qasm("3.0")
+            self.auto_playing = False
+            self.state_info = self.session.evaluate()
+
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            vbox.get_style_context().add_class("main-bg")
+            self.add(vbox)
+
+            # Top Stepper & Preset Toolbar
+            hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            hdr.get_style_context().add_class("header-bar")
+
+            btn_open = Gtk.Button(label="Load QASM/JSON")
+            btn_open.connect("clicked", self._on_open_file)
+            hdr.pack_start(btn_open, False, False, 0)
+
+            self.preset_combo = Gtk.ComboBoxText()
+            cdir = os.path.join(REPO_ROOT, "circuits")
+            if os.path.isdir(cdir):
+                for fn in sorted(os.listdir(cdir)):
+                    if fn.endswith(".qasm"):
+                        self.preset_combo.append(os.path.join(cdir, fn), fn)
+            self.preset_combo.connect("changed", self._on_preset_changed)
+            hdr.pack_start(self.preset_combo, False, False, 0)
+
+            btn_rst = Gtk.Button(label="Reset |0>")
+            btn_rst.connect("clicked", lambda _b: self._set_step(self.session.reset_step()))
+            hdr.pack_start(btn_rst, False, False, 4)
+
+            btn_prev = Gtk.Button(label="< Step Back")
+            btn_prev.connect("clicked", lambda _b: self._set_step(self.session.step_backward()))
+            hdr.pack_start(btn_prev, False, False, 0)
+
+            btn_next = Gtk.Button(label="Step Forward >")
+            btn_next.get_style_context().add_class("accent-btn")
+            btn_next.connect("clicked", lambda _b: self._set_step(self.session.step_forward()))
+            hdr.pack_start(btn_next, False, False, 0)
+
+            btn_end = Gtk.Button(label="Run to End >>")
+            btn_end.connect("clicked", lambda _b: self._set_step(self.session.run_to_end()))
+            hdr.pack_start(btn_end, False, False, 0)
+
+            self.btn_play = Gtk.Button(label="Auto-Step")
+            self.btn_play.connect("clicked", self._on_toggle_play)
+            hdr.pack_start(self.btn_play, False, False, 0)
+
+            hdr.pack_start(Gtk.Box(), True, True, 0)
+
+            btn_hs = Gtk.Button(label="Open in Hilbert Space")
+            btn_hs.get_style_context().add_class("violet-btn")
+            btn_hs.connect("clicked", self._on_open_hilbert)
+            hdr.pack_end(btn_hs, False, False, 0)
+
+            vbox.pack_start(hdr, False, False, 0)
+
+            # Main Body: [Center Cairo Canvas] | [Right Noise & Amplitude Sidebar]
+            body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            body.set_margin_start(8)
+            body.set_margin_end(8)
+            body.set_margin_top(8)
+            body.set_margin_bottom(8)
+            vbox.pack_start(body, True, True, 0)
+
+            canvas_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            canvas_card.get_style_context().add_class("panel-card")
+            self.canvas = Gtk.DrawingArea()
+            self.canvas.connect("draw", self._on_draw)
+            canvas_card.pack_start(self.canvas, True, True, 0)
+
+            self.step_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, max(1, len(self.session.circuit.gates)), 1)
+            self.step_scale.set_digits(0)
+            self.step_scale.set_value(self.session.step)
+            self.step_scale.connect("value-changed", self._on_scrubber_changed)
+            canvas_card.pack_start(self.step_scale, False, False, 4)
+            body.pack_start(canvas_card, True, True, 0)
+
+            # Right Sidebar: NoiseModel Controls + Invariants + Amplitude Table
+            right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            right.set_size_request(300, -1)
+            right.get_style_context().add_class("panel-card")
+            rin = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            rin.set_margin_start(10)
+            rin.set_margin_end(10)
+            rin.set_margin_top(10)
+            rin.set_margin_bottom(10)
+            right.pack_start(rin, True, True, 0)
+
+            nhdr = Gtk.Label(label="KRAUS NOISE MODEL")
+            nhdr.get_style_context().add_class("title-lbl")
+            nhdr.set_xalign(0.0)
+            rin.pack_start(nhdr, False, False, 0)
+
+            self.chk_depol = Gtk.CheckButton(label="Depolarizing Channel")
+            self.chk_depol.connect("toggled", self._on_noise_changed)
+            rin.pack_start(self.chk_depol, False, False, 0)
+
+            self.depol_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.0, 0.15, 0.005)
+            self.depol_scale.set_value(0.02)
+            self.depol_scale.connect("value-changed", self._on_noise_changed)
+            rin.pack_start(self.depol_scale, False, False, 0)
+
+            self.chk_relax = Gtk.CheckButton(label="T1 / T2 Thermal Relaxation")
+            self.chk_relax.connect("toggled", self._on_noise_changed)
+            rin.pack_start(self.chk_relax, False, False, 0)
+
+            l_t1 = Gtk.Label(label="T1 Coherence (us):")
+            l_t1.get_style_context().add_class("sub-lbl")
+            l_t1.set_xalign(0.0)
+            rin.pack_start(l_t1, False, False, 0)
+
+            self.t1_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10.0, 250.0, 5.0)
+            self.t1_scale.set_value(50.0)
+            self.t1_scale.connect("value-changed", self._on_noise_changed)
+            rin.pack_start(self.t1_scale, False, False, 0)
+
+            rin.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+
+            ihdr = Gtk.Label(label="STATE INVARIANTS")
+            ihdr.get_style_context().add_class("title-lbl")
+            ihdr.set_xalign(0.0)
+            rin.pack_start(ihdr, False, False, 0)
+
+            self.lbl_purity = Gtk.Label(label="Purity Tr(rho^2): 1.0000")
+            self.lbl_purity.get_style_context().add_class("metric-val")
+            self.lbl_purity.set_xalign(0.0)
+            rin.pack_start(self.lbl_purity, False, False, 0)
+
+            self.lbl_entropy = Gtk.Label(label="Mixed S(rho): 0.0000 bits")
+            self.lbl_entropy.get_style_context().add_class("metric-val")
+            self.lbl_entropy.set_xalign(0.0)
+            rin.pack_start(self.lbl_entropy, False, False, 0)
+
+            self.lbl_entangle = Gtk.Label(label="Entanglement S(rho_A): 0.0000 bits")
+            self.lbl_entangle.get_style_context().add_class("metric-val")
+            self.lbl_entangle.set_xalign(0.0)
+            rin.pack_start(self.lbl_entangle, False, False, 0)
+
+            ahdr = Gtk.Label(label="BASIS AMPLITUDES |x>")
+            ahdr.get_style_context().add_class("title-lbl")
+            ahdr.set_xalign(0.0)
+            rin.pack_start(ahdr, False, False, 2)
+
+            sw = Gtk.ScrolledWindow()
+            sw.set_vexpand(True)
+            self.ket_view = Gtk.TextView()
+            self.ket_view.set_editable(False)
+            self.ket_view.set_monospace(True)
+            self.ket_view.get_style_context().add_class("ket-view")
+            sw.add(self.ket_view)
+            rin.pack_start(sw, True, True, 0)
+
+            body.pack_start(right, False, False, 0)
+
+            if start_path and os.path.isfile(start_path):
+                self._load_path(start_path)
+            else:
+                self._refresh()
+
+            GLib.timeout_add(650, self._on_auto_tick)
+
+        def _load_path(self, path: str) -> None:
+            try:
+                circ, noise_cfg, qasm_s = load_debug_session(path)
+                self.source_qasm = qasm_s
+                self.session.set_circuit(circ, reset_to_start=False)
+                self.session.apply_noise_dict(noise_cfg)
+                self.chk_depol.set_active(self.session.depol_enabled)
+                self.depol_scale.set_value(self.session.depol_prob)
+                self.chk_relax.set_active(self.session.relax_enabled)
+                self.t1_scale.set_value(self.session.t1_us)
+                self.step_scale.set_range(0, max(1, len(circ.gates)))
+                self.step_scale.set_value(self.session.step)
+                self.set_title(f"OmniQ Quantum Debugger — {os.path.basename(path)}")
+                self._refresh()
+            except Exception:
+                pass
+
+        def _on_open_file(self, _btn) -> None:
+            dlg = Gtk.FileChooserDialog(
+                title="Load OpenQASM or OmniQ Debug JSON",
+                parent=self,
+                action=Gtk.FileChooserAction.OPEN,
+            )
+            dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Open", Gtk.ResponseType.OK)
+            cdir = os.path.join(REPO_ROOT, "circuits")
+            if os.path.isdir(cdir):
+                dlg.set_current_folder(cdir)
+            if dlg.run() == Gtk.ResponseType.OK:
+                fn = dlg.get_filename()
+                if fn:
+                    self._load_path(fn)
+            dlg.destroy()
+
+        def _on_preset_changed(self, combo) -> None:
+            fp = combo.get_active_id()
+            if fp and os.path.isfile(fp):
+                self._load_path(fp)
+
+        def _set_step(self, new_step: int) -> None:
+            self.session.step = new_step
+            self.step_scale.set_value(new_step)
+            self._refresh()
+
+        def _on_scrubber_changed(self, scale) -> None:
+            val = int(round(scale.get_value()))
+            if val != self.session.step:
+                self.session.step = val
+                self._refresh()
+
+        def _on_noise_changed(self, _widget) -> None:
+            self.session.depol_enabled = self.chk_depol.get_active()
+            self.session.depol_prob = float(self.depol_scale.get_value())
+            self.session.relax_enabled = self.chk_relax.get_active()
+            self.session.t1_us = float(self.t1_scale.get_value())
+            self._refresh()
+
+        def _on_toggle_play(self, _btn) -> None:
+            self.auto_playing = not self.auto_playing
+            self.btn_play.set_label("Pause" if self.auto_playing else "Auto-Step")
+            if self.auto_playing and self.session.step >= len(self.session.circuit.gates):
+                self.session.reset_step()
+
+        def _on_auto_tick(self) -> bool:
+            if self.auto_playing:
+                if self.session.step < len(self.session.circuit.gates):
+                    self._set_step(self.session.step_forward())
+                else:
+                    self.auto_playing = False
+                    self.btn_play.set_label("Auto-Step")
+            return True
+
+        def _refresh(self) -> None:
+            self.state_info = self.session.evaluate()
+            self.lbl_purity.set_text(f"Purity Tr(rho^2): {self.state_info['purity']:.4f}")
+            self.lbl_entropy.set_text(f"Mixed S(rho): {self.state_info['vn_entropy']:.4f} bits")
+            self.lbl_entangle.set_text(f"Entanglement S(rho_A): {self.state_info['entanglement_entropy']:.4f} bits")
+
+            sv: Statevector = self.state_info["pure_sv"]
+            probs = self.state_info["probabilities"]
+            order = np.argsort(probs)[::-1][:16]
+            lines = []
+            for idx in order:
+                pr = float(probs[idx])
+                if pr < 1e-4 and len(lines) >= 4:
+                    continue
+                amp = sv.data[idx]
+                ket = format(int(idx), f"0{sv.num_qubits}b")
+                lines.append(f"|{ket}>  P={pr*100:5.1f}%  ({amp.real:+.3f}{amp.imag:+.3f}i)")
+            self.ket_view.get_buffer().set_text("\n".join(lines))
+            self.canvas.queue_draw()
+
+        def _on_draw(self, widget, cr) -> bool:
+            alloc = widget.get_allocation()
+            draw_debugger_canvas(cr, float(alloc.width), float(alloc.height), self.session, self.state_info)
+            return False
+
+        def _on_open_hilbert(self, _btn) -> None:
+            sv: Statevector = self.state_info["pure_sv"]
+            try:
+                if sv.num_qubits <= 6:
+                    with open(IPC_HILBERT_PATH, "w", encoding="utf-8") as f:
+                        json.dump(
+                            {
+                                "source": "omniq-debugger",
+                                "num_qubits": sv.num_qubits,
+                                "qasm": self.source_qasm,
+                                "amplitudes_re": [float(x.real) for x in sv.data],
+                                "amplitudes_im": [float(x.imag) for x in sv.data],
+                            },
+                            f,
+                        )
+            except Exception:
+                pass
+            hs = resolve_sibling_bin("omniq-hilbert-space")
+            cmd = [sys.executable, hs, IPC_HILBERT_PATH] if os.path.isfile(hs) else [hs, IPC_HILBERT_PATH]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    win = OmniQDebuggerWindow(initial_file)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+
+def run_self_test() -> int:
+    import cairo
+    from omniq.debugger import QuantumDebugger
+    from omniqos.debugger_bridge import OmniQDebuggerBridge
+
+    # 1. Verify step-by-step evolution on Bell circuit
+    bell = Circuit(2).h(0).cx(0, 1)
+    sess = DebuggerSession(bell)
+    sess.reset_step()
+    st0 = sess.evaluate()
+    assert abs(st0["entanglement_entropy"] - 0.0) < 1e-6
+
+    sess.step_forward()  # after H(0)
+    st1 = sess.evaluate()
+    assert abs(st1["bloch_vectors"][0][0] - 1.0) < 1e-5  # |+> has bx = +1
+
+    sess.step_forward()  # after CX(0, 1)
+    st2 = sess.evaluate()
+    assert abs(st2["entanglement_entropy"] - 1.0) < 1e-5
+    assert abs(st2["purity"] - 1.0) < 1e-5
+
+    # 2. Verify Kraus NoiseModel degrades purity
+    sess.depol_enabled = True
+    sess.depol_prob = 0.08
+    sess.relax_enabled = True
+    st_noisy = sess.evaluate()
+    assert st_noisy["purity"] < 0.96
+
+    # 3. Verify compatibility with Circuit.debug() JSON export & OmniQDebuggerBridge
+    nm = NoiseModel.createTypicalModel()
+    json_session_path = QuantumDebugger(bell).show(noise_model=nm)
+    try:
+        loaded_c, loaded_nm, _ = load_debug_session(json_session_path)
+        assert loaded_c.num_qubits == 2 and len(loaded_c.gates) == 2
+        assert loaded_nm is not None
+    finally:
+        if os.path.exists(json_session_path):
+            os.unlink(json_session_path)
+
+    assert OmniQDebuggerBridge.find_debugger_binary() is not None
+
+    # 4. Offscreen Cairo draw verification
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 820, 540)
+    cr = cairo.Context(surf)
+    draw_debugger_canvas(cr, 820.0, 540.0, sess, st_noisy)
+
+    print("[PASS] omniq-debugger gate stepper, Kraus NoiseModel, and bridge integration verified.")
+    return 0
+
+
+def main() -> None:
+    if "--test" in sys.argv:
+        sys.exit(run_self_test())
+    init_path = None
+    for a in sys.argv[1:]:
+        if not a.startswith("-"):
+            init_path = a
+            break
+    launch_gui(init_path)
+
+
+if __name__ == "__main__":
+    main()

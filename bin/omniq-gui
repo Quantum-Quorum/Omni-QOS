@@ -1,0 +1,588 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""
+OmniQ-OS: 5-Tier Real-Time Quantum Mission-Control Cockpit (bin/omniq-gui)
+- Tier 1: PREEMPT_RT Deterministic Core Telemetry (isolcpus=2,3, jitter, WDT-RF-CLAMP)
+- Tier 2: 127-Qubit Heavy-Hex QMMU Spatial Lattice & Crosstalk Guard-Band Canvas
+- Tier 3: RFSoC Microwave I/Q Pulse Oscilloscope & 3D Rotating Bloch Wireframe
+- Tier 4: 5-Stage Dilution Fridge & < 50 mK Cryo Thermal Safety Interlock (0x00 DAC Clamp)
+- Tier 5: Interactive Embedded Quantum Linux Terminal (root@omniq-rt:~#)
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import subprocess
+import sys
+import urllib.request
+from typing import Any, Dict, List, Optional
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+for p in [
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    "/opt/omniq/src",
+    "/usr/lib/python3/dist-packages",
+]:
+    if os.path.isdir(p) and p not in sys.path:
+        sys.path.insert(0, p)
+
+from omniqos.core import QPU
+
+
+class CockpitController:
+    """Talks to omniqd (:9090) with transparent in-process QPU fallback."""
+
+    def __init__(self):
+        self.local_qpu = QPU()
+        self.online_daemon = False
+        self.selected_qubit = 0
+        self.local_mxc_mK = 14.25
+        self.local_tripped = False
+
+    def fetch_status(self) -> Dict[str, Any]:
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:9090/api/status", timeout=0.35) as r:
+                data = json.loads(r.read().decode("utf-8"))
+                self.online_daemon = True
+                return data
+        except Exception:
+            self.online_daemon = False
+            top = self.local_qpu.get_topology()
+            il = self.local_qpu.get_interlock()
+            dma = self.local_qpu.test_dma_ring(4096)
+            return {
+                "service": "local-standalone",
+                "kernel": os.uname().release,
+                "operating_state": top.operating_state.name,
+                "jitter_us": 0.0,
+                "qec_loop_ns": dma["measured_ring_ns"],
+                "dma_ring_ns": dma["measured_ring_ns"],
+                "device_name": top.device_name,
+                "total_qubits": top.total_qubits,
+                "total_couplers": top.total_couplers,
+                "avg_t1_us": round(top.avg_t1_us, 1),
+                "avg_t2_us": round(top.avg_t2_us, 1),
+                "cryo": {
+                    "stage_50k_K": 48.5,
+                    "stage_4k_K": 3.85,
+                    "still_mK": 820.0,
+                    "cold_plate_mK": 95.0,
+                    "mxc_mK": round(il["temp_mxc_mK"], 3),
+                    "threshold_mK": 50.0,
+                    "interlock_tripped": il["tripped"],
+                    "rf_dac_clamped": il["rf_dac_clamped"],
+                    "reason": il["reason"],
+                },
+            }
+
+    def post_action(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            raw = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://127.0.0.1:9090{path}",
+                data=raw,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=0.6) as r:
+                return json.loads(r.read().decode("utf-8"))
+        except Exception:
+            if path == "/api/cryo_temp":
+                return self.local_qpu.set_cryo_temp_mK(float(payload.get("temp_mK", 14.25)))
+            if path == "/api/interlock/trip":
+                return self.local_qpu.trip_interlock(str(payload.get("reason", "GUI_WDT_KILL")))
+            if path == "/api/interlock/reset":
+                return self.local_qpu.reset_interlock()
+            if path == "/api/command":
+                cmd = str(payload.get("cmd", "")).strip()
+                if cmd == "uname -a":
+                    return {"output": subprocess.run(["uname", "-a"], capture_output=True, text=True).stdout.strip()}
+                if cmd == "trip-interlock":
+                    self.local_qpu.trip_interlock("TERMINAL_TRIP")
+                    return {"output": "[INTERLOCK TRIPPED] RF DACs clamped to 0x00."}
+                if cmd == "reset-interlock":
+                    self.local_qpu.reset_interlock()
+                    return {"output": "[INTERLOCK RESET] RF synthesis restored."}
+                return {"output": f"omniq-rt# executed: {cmd}"}
+            return {"ok": True}
+
+
+def run_self_test() -> int:
+    ctl = CockpitController()
+    st = ctl.fetch_status()
+    assert st["total_qubits"] == 127
+    ctl.post_action("/api/cryo_temp", {"temp_mK": 61.0})
+    st2 = ctl.fetch_status()
+    assert st2["cryo"]["interlock_tripped"] is True
+    ctl.post_action("/api/cryo_temp", {"temp_mK": 14.25})
+    ctl.post_action("/api/interlock/reset", {})
+    st3 = ctl.fetch_status()
+    assert st3["cryo"]["interlock_tripped"] is False
+    print("[PASS] omniq-gui 5-tier cockpit controller & < 50 mK safety interlock verified.")
+    return 0
+
+
+def launch_gui() -> None:
+    import tkinter as tk
+
+    root = tk.Tk(className="Omniq-gui")
+    root.title("OmniQ-OS — 5-Tier Real-Time Quantum Mission-Control Cockpit")
+    root.geometry("1320x820")
+    root.configure(bg="#0D0B18")
+
+    ctl = CockpitController()
+    after_ids: List[str] = []
+    state_cache: Dict[str, Any] = ctl.fetch_status()
+    phase_ref = [0.0]
+    burst_amp = [0.0]
+
+    def on_close():
+        for aid in list(after_ids):
+            try:
+                root.after_cancel(aid)
+            except Exception:
+                pass
+        after_ids.clear()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+
+    # ---- Tier 1: Top PREEMPT_RT Header Bar ----
+    tier1 = tk.Frame(root, bg="#141126", highlightbackground="#8A4FFF", highlightthickness=1, height=50)
+    tier1.pack(fill="x", padx=8, pady=(8, 4))
+
+    lbl_brand = tk.Label(
+        tier1,
+        text="OMNIQ-OS  |  TIER-1 PREEMPT_RT QUANTUM CORE",
+        fg="#00E5FF",
+        bg="#141126",
+        font=("DejaVu Sans", 11, "bold"),
+    )
+    lbl_brand.pack(side="left", padx=12, pady=8)
+
+    lbl_pills = tk.Label(
+        tier1,
+        text="CORES [2,3] ISOLATED  |  JITTER: 18.2 us  |  GPUDirect-QPU QEC: 512 ns (< 600 ns)",
+        fg="#00FF9D",
+        bg="#141126",
+        font=("DejaVu Sans Mono", 9, "bold"),
+    )
+    lbl_pills.pack(side="left", padx=10)
+
+    def spawn_tool(name: str):
+        p = os.path.join(REPO_ROOT, "bin", name)
+        if not os.path.exists(p):
+            p = f"/usr/local/bin/{name}"
+        if os.path.exists(p):
+            subprocess.Popen([p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    btn_wdt = tk.Button(
+        tier1,
+        text="WDT-RF-CLAMP",
+        bg="#4A0E23",
+        fg="#FF3366",
+        activebackground="#6E1433",
+        activeforeground="#FFFFFF",
+        relief="flat",
+        font=("DejaVu Sans", 9, "bold"),
+        padx=10,
+        command=lambda: do_trip("EMERGENCY_WDT_KILL"),
+    )
+    btn_wdt.pack(side="right", padx=10, pady=6)
+
+    tk.Button(
+        tier1,
+        text="Hilbert Space",
+        bg="#1A1530",
+        fg="#00E5FF",
+        relief="flat",
+        padx=8,
+        command=lambda: spawn_tool("omniq-hilbert-space"),
+    ).pack(side="right", padx=4, pady=6)
+
+    tk.Button(
+        tier1,
+        text="Circuit Maker",
+        bg="#1A1530",
+        fg="#00FF9D",
+        relief="flat",
+        padx=8,
+        command=lambda: spawn_tool("omniq-circuit-maker"),
+    ).pack(side="right", padx=4, pady=6)
+
+    tk.Button(
+        tier1,
+        text="Cryo Lab",
+        bg="#1A1530",
+        fg="#FFB800",
+        relief="flat",
+        padx=8,
+        command=lambda: spawn_tool("omniq-cryo-lab"),
+    ).pack(side="right", padx=4, pady=6)
+
+    # ---- Middle Split: Tier 2 (127Q Heavy-Hex Lattice) + Tier 3 (RFSoC Pulse & 3D Bloch) ----
+    mid = tk.Frame(root, bg="#0D0B18")
+    mid.pack(fill="both", expand=True, padx=8, pady=4)
+
+    tier2 = tk.Frame(mid, bg="#141126", highlightbackground="#8A4FFF", highlightthickness=1)
+    tier2.pack(side="left", fill="both", expand=True, padx=(0, 4))
+
+    t2_hdr = tk.Frame(tier2, bg="#141126")
+    t2_hdr.pack(fill="x", padx=10, pady=6)
+    tk.Label(
+        t2_hdr,
+        text="TIER 2: 127-QUBIT HEAVY-HEX QMMU SPATIAL LATTICE & GUARD BANDS",
+        fg="#00E5FF",
+        bg="#141126",
+        font=("DejaVu Sans", 10, "bold"),
+    ).pack(side="left")
+    lbl_qinfo = tk.Label(
+        t2_hdr,
+        text="Selected Q[0]: f01=5.000 GHz | T1=135 us | T2=105 us",
+        fg="#CBD5E1",
+        bg="#141126",
+        font=("DejaVu Sans Mono", 9),
+    )
+    lbl_qinfo.pack(side="right")
+
+    lattice_cv = tk.Canvas(tier2, bg="#0B0915", highlightthickness=0, height=320)
+    lattice_cv.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    tier3 = tk.Frame(mid, bg="#141126", highlightbackground="#8A4FFF", highlightthickness=1)
+    tier3.pack(side="left", fill="both", expand=True, padx=(4, 0))
+
+    t3_hdr = tk.Frame(tier3, bg="#141126")
+    t3_hdr.pack(fill="x", padx=10, pady=6)
+    tk.Label(
+        t3_hdr,
+        text="TIER 3: RFSOC MICROWAVE I/Q SCOPE & 3D BLOCH PROJECTION",
+        fg="#00E5FF",
+        bg="#141126",
+        font=("DejaVu Sans", 10, "bold"),
+    ).pack(side="left")
+
+    def trigger_burst():
+        burst_amp[0] = 1.0
+        ctl.post_action("/api/burst", {})
+        append_term("[RFSoC] Triggered 127-ch XY-8 + Surface Code syndrome burst (512 ns)")
+
+    tk.Button(
+        t3_hdr,
+        text="PULSE BURST",
+        bg="#16384C",
+        fg="#00E5FF",
+        relief="flat",
+        font=("DejaVu Sans", 8, "bold"),
+        command=trigger_burst,
+    ).pack(side="right")
+
+    scope_cv = tk.Canvas(tier3, bg="#0B0915", highlightthickness=0, height=320)
+    scope_cv.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+    # ---- Tier 4: 5-Stage Dilution Fridge & < 50 mK Cryo Safety Interlock ----
+    tier4 = tk.Frame(root, bg="#141126", highlightbackground="#8A4FFF", highlightthickness=1)
+    tier4.pack(fill="x", padx=8, pady=4)
+
+    t4_top = tk.Frame(tier4, bg="#141126")
+    t4_top.pack(fill="x", padx=12, pady=6)
+
+    tk.Label(
+        t4_top,
+        text="TIER 4: DILUTION REFRIGERATOR & < 50.0 mK CRYO SAFETY INTERLOCK",
+        fg="#00E5FF",
+        bg="#141126",
+        font=("DejaVu Sans", 10, "bold"),
+    ).pack(side="left")
+
+    lbl_interlock = tk.Label(
+        t4_top,
+        text="INTERLOCK ARMED (< 50.0 mK)  |  RF DAC: SYNTHESIS ENABLED",
+        fg="#00FF9D",
+        bg="#141126",
+        font=("DejaVu Sans Mono", 9, "bold"),
+    )
+    lbl_interlock.pack(side="right")
+
+    t4_ctrl = tk.Frame(tier4, bg="#141126")
+    t4_ctrl.pack(fill="x", padx=12, pady=(0, 8))
+
+    lbl_stages = tk.Label(
+        t4_ctrl,
+        text="50K: 48.5 K | 4K: 3.85 K | Still: 820 mK | Cold Plate: 95 mK | MXC: 14.25 mK",
+        fg="#E2E8F0",
+        bg="#141126",
+        font=("DejaVu Sans Mono", 9),
+    )
+    lbl_stages.pack(side="left")
+
+    def on_temp_slide(val_str: str):
+        temp = float(val_str)
+        ctl.post_action("/api/cryo_temp", {"temp_mK": temp})
+        refresh_telemetry()
+
+    def do_trip(reason: str):
+        ctl.post_action("/api/interlock/trip", {"reason": reason})
+        append_term(f"[SAFETY GUARD] {reason} -> RF DACs clamped to 0x00!")
+        refresh_telemetry()
+
+    def do_reset():
+        res = ctl.post_action("/api/interlock/reset", {})
+        if "error" in res:
+            append_term(f"[BLOCKED] {res['error']}")
+        else:
+            append_term("[SAFETY GUARD] Interlock reset — RF microwave synthesis restored.")
+        refresh_telemetry()
+
+    tk.Button(
+        t4_ctrl, text="Reset Interlock", bg="#11382B", fg="#00FF9D", relief="flat", padx=8, command=do_reset
+    ).pack(side="right", padx=4)
+    tk.Button(
+        t4_ctrl, text="Trip Interlock", bg="#4A0E23", fg="#FF3366", relief="flat", padx=8, command=lambda: do_trip("MANUAL_TRIP")
+    ).pack(side="right", padx=4)
+
+    temp_slider = tk.Scale(
+        t4_ctrl,
+        from_=10.0,
+        to=80.0,
+        resolution=0.5,
+        orient="horizontal",
+        length=240,
+        bg="#141126",
+        fg="#00E5FF",
+        troughcolor="#1A1530",
+        highlightthickness=0,
+        command=on_temp_slide,
+    )
+    temp_slider.set(14.25)
+    temp_slider.pack(side="right", padx=10)
+    tk.Label(t4_ctrl, text="MXC Temp (mK):", fg="#94A3B8", bg="#141126", font=("DejaVu Sans", 9)).pack(side="right")
+
+    # ---- Tier 5: Interactive Embedded Quantum Linux Terminal ----
+    tier5 = tk.Frame(root, bg="#141126", highlightbackground="#8A4FFF", highlightthickness=1)
+    tier5.pack(fill="x", padx=8, pady=(4, 8))
+
+    chips = tk.Frame(tier5, bg="#141126")
+    chips.pack(fill="x", padx=10, pady=(6, 2))
+    tk.Label(
+        chips,
+        text="TIER 5: EMBEDDED RT CONSOLE (root@omniq-rt:~#)",
+        fg="#00E5FF",
+        bg="#141126",
+        font=("DejaVu Sans", 9, "bold"),
+    ).pack(side="left", padx=(0, 8))
+
+    term_out = tk.Text(
+        tier5,
+        height=7,
+        bg="#080710",
+        fg="#D8F3DC",
+        insertbackground="#00E5FF",
+        font=("DejaVu Sans Mono", 9),
+        relief="flat",
+    )
+    term_out.pack(fill="x", padx=10, pady=2)
+    term_out.insert(
+        "end",
+        "OmniQ-OS 24.04-RT (Linux 7.0.0-43-generic PREEMPT_RT) — /dev/accel/qpu0 ONLINE\n"
+        "Type a command or click a quick-command chip above.\n",
+    )
+
+    def append_term(text: str):
+        term_out.insert("end", text + "\n")
+        term_out.see("end")
+
+    def exec_console_cmd(cmd: str):
+        if not cmd.strip():
+            return
+        append_term(f"root@omniq-rt:~# {cmd}")
+        res = ctl.post_action("/api/command", {"cmd": cmd})
+        append_term(str(res.get("output", "")))
+        refresh_telemetry()
+
+    for quick in ["uname -a", "dmesg", "ls -l /dev/accel/qpu*", "omniqd status", "vqe-h2", "burst", "trip-interlock", "reset-interlock"]:
+        tk.Button(
+            chips,
+            text=quick,
+            bg="#1A1530",
+            fg="#CBD5E1",
+            relief="flat",
+            font=("DejaVu Sans Mono", 8),
+            padx=6,
+            command=lambda c=quick: exec_console_cmd(c),
+        ).pack(side="left", padx=2)
+
+    cmd_row = tk.Frame(tier5, bg="#141126")
+    cmd_row.pack(fill="x", padx=10, pady=(2, 8))
+    tk.Label(cmd_row, text="root@omniq-rt:~#", fg="#00FF9D", bg="#141126", font=("DejaVu Sans Mono", 9, "bold")).pack(side="left")
+    cmd_entry = tk.Entry(cmd_row, bg="#0B0915", fg="#ECF2FF", insertbackground="#00E5FF", relief="flat", font=("DejaVu Sans Mono", 9))
+    cmd_entry.pack(side="left", fill="x", expand=True, padx=6)
+
+    def on_enter(_ev=None):
+        c = cmd_entry.get()
+        cmd_entry.delete(0, "end")
+        exec_console_cmd(c)
+
+    cmd_entry.bind("<Return>", on_enter)
+
+    # Lattice click handler
+    qubit_positions: Dict[int, tuple] = {}
+
+    def on_lattice_click(ev):
+        best_q = 0
+        best_d = 1e9
+        for qid, (qx, qy) in qubit_positions.items():
+            d = (ev.x - qx) ** 2 + (ev.y - qy) ** 2
+            if d < best_d:
+                best_d = d
+                best_q = qid
+        if best_d < 400:
+            ctl.selected_qubit = best_q
+            freq = 5.000 + best_q * 0.0025
+            t1 = 135 + (best_q * 7) % 25
+            t2 = 105 + (best_q * 5) % 20
+            lbl_qinfo.config(text=f"Selected Q[{best_q:03d}]: f01={freq:.3f} GHz | T1={t1} us | T2={t2} us")
+
+    lattice_cv.bind("<Button-1>", on_lattice_click)
+
+    def draw_canvases():
+        # Draw 127-qubit lattice (16x8 grid layout)
+        lattice_cv.delete("all")
+        lw = max(420, lattice_cv.winfo_width())
+        lh = max(240, lattice_cv.winfo_height())
+        cols, rows = 16, 8
+        gx0, gy0 = 28, 26
+        dx = (lw - 56) / max(1, cols - 1)
+        dy = (lh - 52) / max(1, rows - 1)
+
+        qubit_positions.clear()
+        for q in range(127):
+            r, c = q // cols, q % cols
+            qubit_positions[q] = (gx0 + c * dx, gy0 + r * dy)
+
+        # Couplers
+        for q in range(127):
+            x1, y1 = qubit_positions[q]
+            if (q + 1) % cols != 0 and (q + 1) < 127:
+                x2, y2 = qubit_positions[q + 1]
+                lattice_cv.create_line(x1, y1, x2, y2, fill="#241D42", width=1)
+            if q + cols < 127 and (q % 2 == 0):
+                x2, y2 = qubit_positions[q + cols]
+                lattice_cv.create_line(x1, y1, x2, y2, fill="#241D42", width=1)
+
+        tripped = state_cache.get("cryo", {}).get("interlock_tripped", False)
+        for q, (qx, qy) in qubit_positions.items():
+            if tripped:
+                col = "#FF3366"
+            elif q < 8:
+                col = "#00FF9D"  # Tenant A
+            elif q in (8, 9, 16, 17):
+                col = "#FFB800"  # QMMU Guard Band
+            elif 20 <= q < 28:
+                col = "#8A4FFF"  # Tenant B
+            elif q in (19, 28, 29):
+                col = "#FFB800"
+            else:
+                col = "#00E5FF"
+            rad = 6 if q == ctl.selected_qubit else 4
+            outline = "#FFFFFF" if q == ctl.selected_qubit else ""
+            lattice_cv.create_oval(qx - rad, qy - rad, qx + rad, qy + rad, fill=col, outline=outline)
+
+        # Draw Tier 3 RFSoC Scope + 3D Rotating Bloch Sphere
+        scope_cv.delete("all")
+        sw = max(420, scope_cv.winfo_width())
+        sh = max(240, scope_cv.winfo_height())
+        mid_x = sw * 0.54
+        ph = phase_ref[0]
+
+        # Left half: 8 RFSoC microwave pulse lanes
+        clamped = state_cache.get("cryo", {}).get("rf_dac_clamped", False)
+        for ch in range(8):
+            ly = 24 + ch * ((sh - 36) / 8.0)
+            pts = []
+            for step in range(44):
+                x = 14 + (step / 43.0) * (mid_x - 28)
+                if clamped:
+                    y = ly
+                else:
+                    amp = (9.0 + 12.0 * burst_amp[0]) * math.sin(step * 0.45 + ph + ch * 0.6)
+                    env = math.exp(-((step - 21) ** 2) / 140.0)
+                    y = ly - amp * env
+                pts.extend([x, y])
+            scope_cv.create_line(*pts, fill="#FF3366" if clamped else ("#00E5FF" if ch % 2 == 0 else "#8A4FFF"), width=1.4)
+
+        # Right half: Rotating 3D Bloch Wireframe
+        bcx = mid_x + (sw - mid_x) * 0.5
+        bcy = sh * 0.50
+        brad = min(sw - mid_x, sh) * 0.36
+        scope_cv.create_oval(bcx - brad, bcy - brad, bcx + brad, bcy + brad, outline="#2E2559", width=1.5)
+        scope_cv.create_oval(bcx - brad, bcy - brad * 0.32, bcx + brad, bcy + brad * 0.32, outline="#3B2E73", width=1)
+        vx = bcx + math.cos(ph * 0.8) * math.sin(0.9) * brad
+        vy = bcy - math.cos(0.9 + 0.25 * math.sin(ph * 0.5)) * brad
+        scope_cv.create_line(bcx, bcy, vx, vy, fill="#00FF9D", width=2.5)
+        scope_cv.create_oval(vx - 5, vy - 5, vx + 5, vy + 5, fill="#00FF9D", outline="")
+        scope_cv.create_text(bcx, bcy - brad - 12, text="|0>", fill="#94A3B8", font=("DejaVu Sans Mono", 9))
+        scope_cv.create_text(bcx, bcy + brad + 12, text="|1>", fill="#94A3B8", font=("DejaVu Sans Mono", 9))
+
+    def refresh_telemetry():
+        st = ctl.fetch_status()
+        state_cache.clear()
+        state_cache.update(st)
+        cryo = st.get("cryo", {})
+        mode_badge = "[OMNIQD :9090]" if ctl.online_daemon else "[LOCAL]"
+        op_mode = st.get("operating_state", "SIMULATOR")
+        rtp = st.get("rt_jitter_profile", {}) or {}
+        p99_str = f" (p99 {rtp['p99_ns']/1000.0:.1f} us)" if "p99_ns" in rtp else ""
+        lbl_pills.config(
+            text=f"{mode_badge} [{op_mode}]  |  WAKE JITTER: {st.get('jitter_us', 0.0)} us{p99_str}  |  DMA RING: {int(st.get('dma_ring_ns', st.get('qec_loop_ns', 0)))} ns"
+        )
+        lbl_stages.config(
+            text=(
+                f"50K: {cryo.get('stage_50k_K', 48.5):.1f} K | 4K: {cryo.get('stage_4k_K', 3.85):.2f} K | "
+                f"Still: {cryo.get('still_mK', 820):.0f} mK | Cold: {cryo.get('cold_plate_mK', 95):.0f} mK | "
+                f"MXC: {cryo.get('mxc_mK', 14.25):.2f} mK"
+            )
+        )
+        if cryo.get("interlock_tripped"):
+            lbl_interlock.config(
+                text=f"SAFETY INTERLOCK TRIPPED ({cryo.get('reason', 'QUENCH')})  |  RF DAC: 0x00 CLAMPED",
+                fg="#FF3366",
+            )
+            tier4.config(highlightbackground="#FF3366")
+        else:
+            lbl_interlock.config(
+                text="INTERLOCK ARMED (< 50.0 mK)  |  RF DAC: SYNTHESIS ENABLED",
+                fg="#00FF9D",
+            )
+            tier4.config(highlightbackground="#8A4FFF")
+
+    def anim_step():
+        phase_ref[0] += 0.14
+        burst_amp[0] *= 0.90
+        draw_canvases()
+        aid = root.after(50, anim_step)
+        if len(after_ids) > 4:
+            after_ids.pop(0)
+        after_ids.append(aid)
+
+    def poll_step():
+        refresh_telemetry()
+        aid = root.after(1200, poll_step)
+        after_ids.append(aid)
+
+    refresh_telemetry()
+    anim_step()
+    poll_step()
+    root.mainloop()
+
+
+def main():
+    if "--test" in sys.argv:
+        sys.exit(run_self_test())
+    launch_gui()
+
+
+if __name__ == "__main__":
+    main()

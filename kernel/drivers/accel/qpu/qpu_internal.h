@@ -22,6 +22,8 @@
 #else
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <sys/types.h>
 #include <pthread.h>
 #ifndef __user
 #define __user
@@ -35,6 +37,7 @@ struct file;
 #define QPU_DRIVER_VERSION "0.1.0-rt"
 #define QPU_DEV_NAME       "accel/qpu0"
 
+#define QPU_DMA_RING_SIZE  (64 * 1024)
 #define QPU_MAX_PARTITIONS 16
 #define QPU_DEFAULT_QUBITS 127
 #define QPU_DEFAULT_COUPLERS 144
@@ -112,8 +115,23 @@ struct qpu_device {
 	__u64 next_job_id;
 	struct qpu_job_entry *job_history_head;
 
+	/* Zero-Copy Shared DMA Ring Buffer */
+	void  *dma_ring_virt;
+	size_t dma_ring_size;
+	__u64  last_dma_bench_ns;
+#ifdef __KERNEL__
+	dma_addr_t dma_ring_phys;
+	bool       dma_is_coherent;
+#endif
+
 	/* Fallback Simulator State */
 	bool is_emulated;
+
+	/* Cryogenic Thermal Safety & RF Microwave Interlock */
+	bool  interlock_tripped;
+	bool  rf_dac_clamped;
+	__u64 interlock_trip_count;
+	char  interlock_reason[64];
 };
 
 /* Global Device Singleton */
@@ -123,6 +141,14 @@ extern struct qpu_device *g_qpu_dev;
 int  qpu_pci_init(struct qpu_device *qdev);
 void qpu_pci_cleanup(struct qpu_device *qdev);
 
+int  qpu_dma_init(struct qpu_device *qdev);
+void qpu_dma_cleanup(struct qpu_device *qdev);
+int  qpu_dma_benchmark_ring(struct qpu_device *qdev, __u64 bytes, __u32 *out_ns);
+#ifdef __KERNEL__
+struct dma_buf;
+struct dma_buf *qpu_dma_export_ring(struct qpu_device *qdev);
+#endif
+
 int  qpu_sysfs_init(struct qpu_device *qdev);
 void qpu_sysfs_cleanup(struct qpu_device *qdev);
 
@@ -131,6 +157,7 @@ int  qpu_qmmu_alloc(struct qpu_device *qdev, struct qpu_alloc_request *req, __u3
 int  qpu_qmmu_free(struct qpu_device *qdev, struct qpu_free_request *req, __u32 pid);
 
 int  qpu_fallback_init(struct qpu_device *qdev);
+void qpu_fallback_cleanup(struct qpu_device *qdev);
 int  qpu_fallback_submit_job(struct qpu_device *qdev, struct qpu_job_submission *job);
 int  qpu_fallback_read_results(struct qpu_device *qdev, struct qpu_results_read *res);
 

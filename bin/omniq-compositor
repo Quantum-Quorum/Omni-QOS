@@ -1,0 +1,147 @@
+#!/bin/sh
+# ==============================================================================
+# OmniQ-OS: Real-Time Quantum Linux
+# Hypervisor-Aware Desktop Compositor Launcher: bin/omniq-compositor
+# Launches vendor/picom or /opt/omniq/picom with xrender on VirtualBox/QEMU or
+# glx (dual_kawase blur) on bare-metal GPUs.
+#
+# Usage: omniq-compositor [start|stop|restart|status|--test]
+# ==============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+PICOM_HOME=""
+for cand in "${OMNIQ_PICOM_HOME:-}" "/opt/omniq/picom" "$REPO_ROOT/vendor/picom"; do
+    if [ -n "$cand" ] && [ -x "$cand/bin/picom" ]; then
+        PICOM_HOME="$cand"
+        break
+    fi
+done
+
+if [ -n "$PICOM_HOME" ]; then
+    PICOM_BIN="$PICOM_HOME/bin/picom"
+    PICOM_LIB="$PICOM_HOME/lib"
+else
+    PICOM_BIN="$(command -v picom 2>/dev/null || true)"
+    PICOM_LIB=""
+fi
+
+CONF="${OMNIQ_PICOM_CONF:-/etc/omniq/picom.conf}"
+[ -f "$CONF" ] || CONF="$REPO_ROOT/etc/omniq/picom.conf"
+
+LOG="/var/log/omniq-compositor.log"
+[ -w "/var/log" ] || LOG="/tmp/omniq-compositor.log"
+STATE="/tmp/omniq-compositor.backend"
+export DISPLAY="${DISPLAY:-:0}"
+
+is_running() {
+    pgrep -x picom >/dev/null 2>&1
+}
+
+stop_picom() {
+    pkill -x picom 2>/dev/null || true
+    sleep 0.3
+    rm -f "$STATE"
+}
+
+launch() {
+    backend="$1"
+    shift
+    if [ -n "$PICOM_LIB" ]; then
+        LD_LIBRARY_PATH="$PICOM_LIB:${LD_LIBRARY_PATH:-}" "$PICOM_BIN" \
+            --config "$CONF" --backend "$backend" "$@" >>"$LOG" 2>&1 &
+    else
+        "$PICOM_BIN" --config "$CONF" --backend "$backend" "$@" >>"$LOG" 2>&1 &
+    fi
+    sleep 1.2
+    if is_running; then
+        echo "$backend" > "$STATE"
+        return 0
+    fi
+    return 1
+}
+
+is_vm() {
+    if grep -qi -E 'virtualbox|qemu|kvm|vmware|bochs|innotek' \
+        /sys/class/dmi/id/product_name \
+        /sys/class/dmi/id/sys_vendor \
+        /sys/class/dmi/id/board_vendor 2>/dev/null; then
+        return 0
+    fi
+    if [ -d /proc/vz ] || [ -f /sys/hypervisor/type ]; then
+        return 0
+    fi
+    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -q 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+start_picom() {
+    if [ -z "$PICOM_BIN" ] || [ ! -x "$PICOM_BIN" ]; then
+        echo "[!] picom binary not found; running without compositing" >&2
+        return 1
+    fi
+    if is_running; then
+        echo "[*] omniq-compositor already running ($(cat "$STATE" 2>/dev/null || echo unknown))"
+        return 0
+    fi
+    : > "$LOG" 2>/dev/null || true
+
+    if is_vm; then
+        if launch xrender --blur-method kernel --blur-kern 5x5gaussian; then
+            echo "[+] omniq-compositor started: xrender (kernel blur in hypervisor)"
+            return 0
+        fi
+        stop_picom
+        if launch xrender; then
+            echo "[+] omniq-compositor started: xrender (hypervisor safe mode)"
+            return 0
+        fi
+        stop_picom
+    fi
+
+    if launch glx --blur-method dual_kawase --blur-strength 6; then
+        echo "[+] omniq-compositor started: glx (dual_kawase blur)"
+        return 0
+    fi
+    stop_picom
+    if launch xrender --blur-method kernel --blur-kern 5x5gaussian; then
+        echo "[+] omniq-compositor started: xrender (kernel blur fallback)"
+        return 0
+    fi
+    stop_picom
+    if launch xrender; then
+        echo "[+] omniq-compositor started: xrender (fallback)"
+        return 0
+    fi
+    echo "[!] omniq-compositor failed to start; see $LOG" >&2
+    return 1
+}
+
+case "${1:-start}" in
+    start)   start_picom ;;
+    stop)    stop_picom; echo "[+] omniq-compositor stopped" ;;
+    restart) stop_picom; start_picom ;;
+    status)
+        if is_running; then
+            echo "running ($(cat "$STATE" 2>/dev/null || echo unknown))"
+        else
+            echo "stopped"
+            exit 1
+        fi
+        ;;
+    --test)
+        sh -n "$0"
+        if [ -n "$PICOM_BIN" ] && [ -x "$PICOM_BIN" ]; then
+            LD_LIBRARY_PATH="${PICOM_LIB:-}:${LD_LIBRARY_PATH:-}" "$PICOM_BIN" --version >/dev/null
+        fi
+        echo "[+] omniq-compositor syntax and binary check OK"
+        exit 0
+        ;;
+    *)
+        echo "Usage: omniq-compositor [start|stop|restart|status|--test]"
+        exit 2
+        ;;
+esac

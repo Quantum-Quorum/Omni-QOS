@@ -1,82 +1,67 @@
 """
 OmniQ: Seamless Quantum Programming Across Python and C.
-
-A modern, open-source software library designed for quantum computing research and development.
 """
 
-__version__ = "0.1.0"
-__author__ = "Goutham Arcot"
-__email__ = "goutham.arcot@quantum-quorum.com"
+__version__ = "2.0.0"
+__author__ = "Quantum Quorum"
+__email__ = "developers@omniq.org"
 
-# Import core modules
-from .circuit import Circuit
+from .circuit import Circuit, Statevector, DensityMatrix
+from .stabilizer import CliffordSimulator
+from .lab import (
+    SCPITransport,
+    LakeShore372Driver,
+    MicrowaveLODriver,
+    BlueforsClient,
+    ModbusTCPClient,
+    CryoPLCController,
+    QickProgramCompiler,
+    QickRFSocClient,
+    LabRackManager,
+)
 from .noise import NoiseModel
 from .device import Device, SimulatorDevice, QPUDevice
 from .qos import QPUClient
-# from .crypto import ShorsAlgorithm, GroversCrypto
-# from .qml import VariationalCircuit, QMLModel
-# from .optimization import QAOA, VQE
+from .crypto import ShorsAlgorithm, GroversCrypto
+from .qml import VariationalCircuit, QMLModel
+from .optimization import QAOA, VQE
+from .qec import SurfaceCodeLattice, build_bit_flip_code_circuit
+from .chem import MolecularHamiltonian, VQESolver, compute_dissociation_curve
+from .chaos import compute_otoc, loschmidt_echo, haar_random_state, haar_random_unitary
+from .utils import (
+    create_bell_state,
+    create_ghz_state,
+    measure_expectation,
+    calculate_fidelity,
+    random_circuit,
+)
 from . import debugger
-
-# Add debugger methods to Circuit class
 debugger.add_debugger_to_circuit()
-
-# Import utility functions
-# from .utils import (
-#     create_bell_state,
-#     create_ghz_state,
-#     measure_expectation,
-#     calculate_fidelity,
-#     random_circuit
-# )
-
-# Import debugger functions
 from .debugger import show_debugger, QuantumDebugger
-
-# Version info
-def version_info():
-    """Return version information."""
-    return {
-        'version': __version__,
-        'author': __author__,
-        'email': __email__
-    }
-
-# Package level constants
-DEFAULT_DEVICE = 'default.qubit'
-SUPPORTED_DEVICES = ['default.qubit', 'lightning.qubit', 'ibmq.manila', 'ionq.simulator']
-
 from .magnon_logical import MagnonicGate, DualRailCompiler, create_dual_rail_grover
 
-try:
-    from _omniq_core import QuditStatevector, DualRailDampingChannel
-except ImportError:
-    QuditStatevector = None
-    DualRailDampingChannel = None
+DEFAULT_DEVICE = "default.qubit"
+SUPPORTED_DEVICES = ["default.qubit", "omniq.qpu0", "lightning.qubit", "ibmq.manila", "ionq.simulator"]
+QuditStatevector = Statevector
+DualRailDampingChannel = NoiseModel
 
-# Import all public API
+
+def version_info():
+    return {"version": __version__, "author": __author__, "email": __email__}
+
+
 __all__ = [
-    # Core classes
-    'Circuit',
-    'NoiseModel',
-    'Device',
-    'SimulatorDevice',
-    'QPUDevice',
-    'QPUClient',
-    'QuditStatevector',
-    'DualRailDampingChannel',
-    
-    # Magnon Dual-Rail Logical
-    'MagnonicGate',
-    'DualRailCompiler',
-    'create_dual_rail_grover',
-    
-    # Debugger
-    'show_debugger',
-    'QuantumDebugger',
-    
-    # Version
-    'version_info',
-    '__version__'
+    "Circuit", "Statevector", "DensityMatrix", "NoiseModel",
+    "Device", "SimulatorDevice", "QPUDevice", "QPUClient",
+    "ShorsAlgorithm", "GroversCrypto", "VariationalCircuit", "QMLModel",
+    "QAOA", "VQE", "SurfaceCodeLattice", "build_bit_flip_code_circuit",
+    "MolecularHamiltonian", "VQESolver", "compute_dissociation_curve",
+    "compute_otoc", "loschmidt_echo", "haar_random_state", "haar_random_unitary",
+    "create_bell_state", "create_ghz_state", "measure_expectation", "calculate_fidelity", "random_circuit",
+    "MagnonicGate", "DualRailCompiler", "create_dual_rail_grover",
+    "show_debugger", "QuantumDebugger", "QuditStatevector", "DualRailDampingChannel",
+    "CliffordSimulator", "SCPITransport", "LakeShore372Driver", "MicrowaveLODriver",
+    "BlueforsClient", "ModbusTCPClient", "CryoPLCController", "QickProgramCompiler",
+    "QickRFSocClient", "LabRackManager",
+    "version_info", "__version__",
 ]
-

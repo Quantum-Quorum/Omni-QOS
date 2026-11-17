@@ -56,6 +56,12 @@ typedef int64_t  __s64;
 #define QPU_ALLOC_FLAG_DYNAMIC_DECOUPLE (1 << 1) /* Auto CPMG/XY-8 on idle */
 #define QPU_ALLOC_FLAG_GPUDIRECT        (1 << 2) /* Pin buffers for GPU P2P DMA */
 
+/* Cryogenic Safety & RF Interlock Flags */
+#define QPU_CRYO_FLAG_NOMINAL           0x00
+#define QPU_CRYO_FLAG_INTERLOCK_TRIPPED (1 << 0) /* Hardware interlock active */
+#define QPU_CRYO_FLAG_RF_CLAMPED        (1 << 1) /* Microwave DACs clamped to 0x00 */
+#define QPU_CRYO_FLAG_THERMAL_QUENCH    (1 << 2) /* MXC >= 50.000 mK ceiling breach */
+
 /* Cryogenic Temperature Telemetry */
 struct qpu_cryo_telemetry {
 	__u32 temp_50k_mK;        /* 50K Stage (milli-Kelvin) */
@@ -164,6 +170,16 @@ struct qpu_p2p_dma_desc {
 	__u32 latency_budget_ns;  /* Max allowable round trip (e.g. 600 ns) */
 };
 
+/* Cryogenic Thermal Safety & RF Microwave Interlock State */
+struct qpu_interlock_state {
+	__u32 tripped;            /* 1 if safety interlock is engaged */
+	__u32 rf_dac_clamped;     /* 1 if RF DAC channels are clamped to 0x00 */
+	__u32 temp_mxc_mK;        /* Mixing chamber temperature (in uK, e.g. 14250 = 14.250 mK) */
+	__u32 threshold_mK;       /* Safety ceiling (50000 = 50.000 mK) */
+	__u64 trip_count;         /* Cumulative hardware interlock trip counter */
+	char  reason[64];         /* Diagnostic trip/reset reason */
+};
+
 /* =========================================================================
  * IOCTL Command Definitions
  * ========================================================================= */
@@ -189,6 +205,21 @@ struct qpu_p2p_dma_desc {
 
 #define QPU_IOCTL_P2P_DMA_MAP \
 	_IOWR(QPU_IOCTL_MAGIC, 0x07, struct qpu_p2p_dma_desc)
+
+#define QPU_IOCTL_TRIP_INTERLOCK \
+	_IOWR(QPU_IOCTL_MAGIC, 0x08, struct qpu_interlock_state)
+
+#define QPU_IOCTL_RESET_INTERLOCK \
+	_IOWR(QPU_IOCTL_MAGIC, 0x09, struct qpu_interlock_state)
+
+#define QPU_IOCTL_SET_CRYO_TEMP \
+	_IOWR(QPU_IOCTL_MAGIC, 0x0A, struct qpu_interlock_state)
+
+#define QPU_IOCTL_GET_INTERLOCK \
+	_IOR(QPU_IOCTL_MAGIC, 0x0B, struct qpu_interlock_state)
+
+#define QPU_IOCTL_RESET_QUBIT \
+	_IOW(QPU_IOCTL_MAGIC, 0x0C, __u16)
 
 #endif /* _UAPI_LINUX_QPU_H */
 

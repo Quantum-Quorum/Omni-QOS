@@ -48,3 +48,14 @@ class OmniQCirqResult:
     def histogram(self, key: str = "m") -> dict:
         return self.counts
 
+
+class OmniQDevice:
+    """Cirq Device metadata representation for the 127-qubit Heavy-Hex QPU."""
+    def __init__(self, qpu_instance: Optional[QPU] = None):
+        self._qpu = qpu_instance or QPU()
+        top = self._qpu.get_topology()
+        self.name = top.device_name
+        self.num_qubits = top.total_qubits
+        self.couplers = top.couplers
+
+

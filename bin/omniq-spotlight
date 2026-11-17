@@ -1,0 +1,395 @@
+#!/usr/bin/env python3
+"""
+=============================================================================
+OmniQ-OS: Real-Time Quantum Linux - Spotlight Quick Search (Alt+Space)
+Component: bin/omniq-spotlight
+Native GTK+ 3 Keyboard-Driven Quantum Application, Settings & QASM File Finder
+=============================================================================
+"""
+
+import os
+import sys
+import glob
+import shutil
+import subprocess
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+CSS_DATA = b"""
+window {
+    background-color: transparent;
+}
+
+.spotlight-box {
+    background-color: #0D0B18;
+    border: 2px solid #8A4FFF;
+    border-radius: 14px;
+    padding: 14px;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.85), 0 0 16px rgba(138, 79, 255, 0.42);
+}
+
+entry {
+    background-color: #141126;
+    border: 1px solid #00E5FF;
+    border-radius: 9px;
+    color: #FFFFFF;
+    font-size: 14px;
+    font-weight: bold;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    caret-color: #00E5FF;
+}
+
+entry:focus {
+    border-color: #00FF9D;
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.45);
+}
+
+list {
+    background-color: transparent;
+}
+
+row {
+    background-color: #141126;
+    border-radius: 8px;
+    margin-bottom: 4px;
+    padding: 6px 10px;
+    transition: all 100ms ease;
+}
+
+row:hover {
+    background-color: #1A1530;
+}
+
+row:selected {
+    background: linear-gradient(135deg, #8A4FFF, #00A8CC);
+    color: #FFFFFF;
+}
+
+.item-title {
+    font-size: 13px;
+    font-weight: bold;
+    color: #FFFFFF;
+}
+
+.item-desc {
+    font-size: 10px;
+    color: #9E97B8;
+}
+
+row:selected .item-desc {
+    color: #F0E8FF;
+}
+
+.item-category {
+    font-size: 9px;
+    font-weight: bold;
+    color: #00E5FF;
+    border: 1px solid #00E5FF;
+    border-radius: 4px;
+    padding: 2px 6px;
+}
+
+scrollbar slider {
+    background-color: rgba(138, 79, 255, 0.45);
+    border-radius: 4px;
+    min-width: 6px;
+}
+
+scrollbar slider:hover {
+    background-color: #00E5FF;
+}
+
+scrollbar trough {
+    background-color: transparent;
+}
+"""
+
+ICON_DIRS = [
+    "/usr/share/omniq/icons",
+    "/etc/omniq/icons",
+    os.path.join(REPO_ROOT, "etc/omniq/icons"),
+    "/usr/share/omniq/icons/24x24",
+    "/etc/omniq/icons/24x24",
+    os.path.join(REPO_ROOT, "etc/omniq/icons/24x24"),
+    "/usr/share/omniq/icons/16x16",
+    "/etc/omniq/icons/16x16",
+    os.path.join(REPO_ROOT, "etc/omniq/icons/16x16"),
+]
+
+
+def find_icon(name):
+    for d in ICON_DIRS:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+SYSTEM_ITEMS = [
+    {"name": "Cryogenic Dilution Lab & SCPI Console", "desc": "Lake Shore 372 SCPI, R&S LO, Bluefors REST & Modbus/TCP valve console", "cmd": ["/usr/local/bin/omniq-cryo-lab"], "cat": "CRYO-LAB", "icon": "cryo_lab"},
+    {"name": "OmniQ Quantum Mission Cockpit", "desc": "Real-time cryostat telemetry, QMMU matrix & GPUDirect-QPU loop", "cmd": ["/usr/local/bin/omniq-gui"], "cat": "QUANTUM", "icon": "cockpit"},
+    {"name": "Quantum Circuit Maker", "desc": "Visual OpenQASM 2.0/3.0 gate composer, transpiler & pulse preview", "cmd": ["/usr/local/bin/omniq-circuit-maker"], "cat": "QUANTUM", "icon": "circuit_maker"},
+    {"name": "Hilbert Space & Bloch Explorer", "desc": "Interactive 3D Bloch sphere, density matrix & statevector viewer", "cmd": ["/usr/local/bin/omniq-hilbert-space"], "cat": "QUANTUM", "icon": "hilbert"},
+    {"name": "Surface Code QEC Decoder", "desc": "Sub-600ns Minimum Weight Perfect Matching syndrome visualizer", "cmd": ["/usr/local/bin/omniq-qec"], "cat": "QEC", "icon": "qec"},
+    {"name": "VQE Molecular Chemistry Lab", "desc": "Variational Quantum Eigensolver ground-state energy studio", "cmd": ["/usr/local/bin/omniq-vqe-chem"], "cat": "ALGO", "icon": "vqe_chem"},
+    {"name": "Quantum Statevector Debugger", "desc": "Gate-by-gate unitary step debugger & amplitude inspector", "cmd": ["/usr/local/bin/omniq-debugger"], "cat": "QUANTUM", "icon": "debugger"},
+    {"name": "3D Cryogenic QPU Visualizer", "desc": "5-stage dilution refrigerator & 128-qubit Heavy-Hex topology", "cmd": ["/usr/local/bin/omniq-qpu-3d"], "cat": "HARDWARE", "icon": "qpu_3d"},
+    {"name": "NIST PQC & SOC 2 Security Audit", "desc": "ML-KEM-1024 / ML-DSA-87 post-quantum & SOC 2 compliance auditor", "cmd": ["/usr/local/bin/omniq-pqc-audit"], "cat": "SECURITY", "icon": "pqc_audit"},
+    {"name": "OmniQ Power Terminal", "desc": "Tiled multi-pane quantum developer console", "cmd": ["/usr/local/bin/omniq-terminal"], "cat": "APP", "icon": "terminal"},
+    {"name": "QPU-SMI Live Telemetry", "desc": "Full ANSI terminal HUD for transmon & cryostat metrics", "cmd": ["/usr/local/bin/omniq-terminal", "-e", "qpu-smi --watch"], "cat": "QUANTUM", "icon": "terminal"},
+    {"name": "OmniQ File & Circuit Explorer", "desc": "Browse /root/circuits OpenQASM programs & workstation files", "cmd": ["/usr/local/bin/omniq-files", "/root/circuits"], "cat": "FILES", "icon": "circuits_folder"},
+    {"name": "OpenQASM & Code Editor", "desc": "Syntax-highlighted editor for OpenQASM, Python & C++", "cmd": ["/usr/local/bin/omniq-edit"], "cat": "APP", "icon": "editor"},
+    {"name": "System Settings", "desc": "Displays, audio, network, QPU hardware & RT latency profiles", "cmd": ["/usr/local/bin/omniq-settings"], "cat": "SETTINGS", "icon": "settings"},
+    {"name": "OmniQ Quick Control Center", "desc": "Top-right glassmorphic quick toggles, sliders & cryo alerts", "cmd": ["/usr/local/bin/omniq-control-panel"], "cat": "SYSTEM", "icon": "control_center"},
+    {"name": "Real-Time Task Monitor", "desc": "CPU/RAM gauges, SCHED_FIFO threads & QPU partition PIDs", "cmd": ["/usr/local/bin/omniq-tasks"], "cat": "SYSTEM", "icon": "tasks"},
+    {"name": "Quantum Documentation Browser", "desc": "Web & local quantum research documentation browser", "cmd": ["/usr/local/bin/omniq-browser"], "cat": "APP", "icon": "browser"},
+    {"name": "Ports & RFSoC Link Manager", "desc": "Active TCP/UDP sockets, omniqd IPC & PCIe/Ethernet links", "cmd": ["/usr/local/bin/omniq-ports"], "cat": "NETWORK", "icon": "ports"},
+    {"name": "NVMe & Partition Storage Manager", "desc": "Block device layout, mount points & disk health", "cmd": ["/usr/local/bin/omniq-disks"], "cat": "STORAGE", "icon": "disks"},
+    {"name": "Permanent Disk OS Installer", "desc": "Deploy OmniQ-OS permanently to NVMe or SATA storage", "cmd": ["/usr/local/bin/omniq-installer"], "cat": "SYSTEM", "icon": "installer"},
+    {"name": "Quantum Wallpaper Gallery", "desc": "Switch between 6 high-DPI quantum desktop wallpapers", "cmd": ["/usr/local/bin/omniq-wallpaper", "--gui"], "cat": "DISPLAY", "icon": "wallpaper"},
+    {"name": "HDMI & Display Switcher", "desc": "Mirror, extend desktop or switch external displays", "cmd": ["/usr/local/bin/omniq-display-switcher"], "cat": "DISPLAY", "icon": "screensaver"},
+    {"name": "Screen Capture Utility", "desc": "Fullscreen or active window PNG screenshot & clipboard copy", "cmd": ["/usr/local/bin/omniq-screenshot"], "cat": "TOOL", "icon": "screenshot"},
+    {"name": "Lock Quantum Session", "desc": "Lock workstation display with passphrase protection", "cmd": ["/usr/local/bin/omniq-screensaver", "--lock"], "cat": "SECURITY", "icon": "lock"},
+    {"name": "Quantum Entanglement Screensaver", "desc": "Preview interactive quantum coherence lattice screensaver", "cmd": ["/usr/local/bin/omniq-screensaver", "--preview"], "cat": "DISPLAY", "icon": "screensaver"},
+    {"name": "Applications Overview Grid", "desc": "Full categorized Quantum & OS application launcher", "cmd": ["/usr/local/bin/omniq-app-launcher"], "cat": "APP", "icon": "apps_grid"},
+    {"name": "Power & Shutdown Control", "desc": "Clean ACPI poweroff, reboot or suspend session", "cmd": ["/usr/local/bin/omniq-power"], "cat": "SYSTEM", "icon": "power"},
+    {"name": "Reload OmniQ Desktop", "desc": "Soft restart JWM window manager & top bar", "cmd": ["jwm", "-restart"], "cat": "ACTION", "icon": "settings"},
+]
+
+
+def discover_qasm_items(query):
+    results = []
+    search_roots = ["/root/circuits", os.path.expanduser("~/circuits")]
+    seen = set()
+    for sroot in search_roots:
+        if not os.path.isdir(sroot):
+            continue
+        try:
+            for fpath in glob.glob(os.path.join(sroot, "**/*.qasm"), recursive=True):
+                real = os.path.realpath(fpath)
+                if real in seen:
+                    continue
+                bname = os.path.basename(fpath)
+                if not query or query in bname.lower() or query in "qasm circuit":
+                    seen.add(real)
+                    results.append({
+                        "name": f"Circuit: {bname}",
+                        "desc": fpath,
+                        "cmd": ["/usr/local/bin/omniq-circuit-maker", fpath],
+                        "cat": "QASM",
+                        "icon": "circuits_folder",
+                    })
+        except Exception:
+            pass
+    return results[:6]
+
+
+class SpotlightWindow(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_wmclass("omniq-spotlight", "Omniq-spotlight")
+        self.set_title("OmniQ Spotlight")
+        self.set_default_size(680, 430)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_decorated(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_keep_above(True)
+        self._user_navigated = False
+
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual and screen.is_composited():
+            self.set_visual(visual)
+
+        icon_path = find_icon("spotlight_16.png") or find_icon("spotlight.png")
+        if icon_path:
+            try:
+                self.set_icon_from_file(icon_path)
+            except Exception:
+                pass
+
+        style_provider = Gtk.CssProvider()
+        style_provider.load_from_data(CSS_DATA)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            style_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+        settings_gtk = Gtk.Settings.get_default()
+        if settings_gtk:
+            settings_gtk.set_property("gtk-application-prefer-dark-theme", True)
+
+        container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        container.get_style_context().add_class("spotlight-box")
+        self.add(container)
+
+        self.entry = Gtk.Entry()
+        self.entry.set_placeholder_text("Search Quantum apps, QEC, VQE, settings, or .qasm circuits... [Esc to close]")
+        if icon_path:
+            try:
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(icon_path, 16, 16, True)
+                self.entry.set_icon_from_pixbuf(Gtk.EntryIconPosition.PRIMARY, pix)
+            except Exception:
+                pass
+        self.entry.connect("changed", self._on_search_changed)
+        self.entry.connect("key-press-event", self._on_key_press)
+        container.pack_start(self.entry, False, False, 0)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_hexpand(True)
+        scroll.set_vexpand(True)
+
+        self.listbox = Gtk.ListBox()
+        self.listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.listbox.connect("row-activated", self._on_row_activated)
+        scroll.add(self.listbox)
+        container.pack_start(scroll, True, True, 0)
+
+        self.connect("focus-out-event", lambda _w, _e: self.destroy())
+        self._filter_items("")
+
+    def _filter_items(self, query):
+        for child in self.listbox.get_children():
+            self.listbox.remove(child)
+
+        q = query.strip().lower()
+        matches = []
+        for item in SYSTEM_ITEMS:
+            if not q or (
+                q in item["name"].lower()
+                or q in item["desc"].lower()
+                or q in item["cat"].lower()
+            ):
+                matches.append(item)
+
+        qasm_hits = discover_qasm_items(q)
+        if q:
+            matches.extend(qasm_hits)
+        else:
+            matches = matches[:10] + qasm_hits[:2]
+
+        for it in matches[:12]:
+            row = Gtk.ListBoxRow()
+            box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            box.set_margin_start(4)
+            box.set_margin_end(4)
+
+            icon_file = (
+                find_icon(f"{it['icon']}_24.png")
+                or find_icon(f"{it['icon']}.png")
+                or find_icon(f"{it['icon']}_16.png")
+                or find_icon("omniq-logo_24.png")
+            )
+            if icon_file:
+                box.pack_start(Gtk.Image.new_from_file(icon_file), False, False, 0)
+
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            t_lbl = Gtk.Label(label=it["name"])
+            t_lbl.set_xalign(0.0)
+            t_lbl.get_style_context().add_class("item-title")
+            vbox.pack_start(t_lbl, False, False, 0)
+
+            d_lbl = Gtk.Label(label=it["desc"])
+            d_lbl.set_xalign(0.0)
+            d_lbl.get_style_context().add_class("item-desc")
+            vbox.pack_start(d_lbl, False, False, 0)
+
+            box.pack_start(vbox, True, True, 0)
+
+            c_lbl = Gtk.Label(label=it["cat"])
+            c_lbl.set_xalign(0.5)
+            c_lbl.get_style_context().add_class("item-category")
+            box.pack_start(c_lbl, False, False, 0)
+
+            row.add(box)
+            row.item_data = it
+            self.listbox.add(row)
+
+        self.listbox.show_all()
+        first_row = self.listbox.get_row_at_index(0)
+        if first_row:
+            self.listbox.select_row(first_row)
+
+    def _on_search_changed(self, entry):
+        self._filter_items(entry.get_text())
+
+    def _on_key_press(self, _widget, event):
+        key = event.keyval
+        if key == Gdk.KEY_Escape:
+            self.destroy()
+            return True
+        if key == Gdk.KEY_Down:
+            self._user_navigated = True
+            sel = self.listbox.get_selected_row()
+            if sel:
+                nxt = self.listbox.get_row_at_index(sel.get_index() + 1)
+                if nxt:
+                    self.listbox.select_row(nxt)
+            return True
+        if key == Gdk.KEY_Up:
+            self._user_navigated = True
+            sel = self.listbox.get_selected_row()
+            if sel and sel.get_index() > 0:
+                prv = self.listbox.get_row_at_index(sel.get_index() - 1)
+                if prv:
+                    self.listbox.select_row(prv)
+            return True
+        if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            query = self.entry.get_text().strip()
+            if not query and not self._user_navigated:
+                return True
+            sel = self.listbox.get_selected_row()
+            if sel and hasattr(sel, "item_data"):
+                self._launch_item(sel.item_data)
+            return True
+        return False
+
+    def _on_row_activated(self, _listbox, row):
+        if hasattr(row, "item_data"):
+            self._launch_item(row.item_data)
+
+    def _launch_item(self, item):
+        cmd = list(item.get("cmd", []))
+        if cmd:
+            exe = cmd[0]
+            if exe.startswith("/usr/local/bin/"):
+                base = os.path.basename(exe)
+                repo_cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), base)
+                if os.path.isfile(exe) and os.access(exe, os.X_OK):
+                    cmd[0] = exe
+                elif shutil.which(base):
+                    cmd[0] = shutil.which(base)
+                elif os.path.isfile(repo_cand) and os.access(repo_cand, os.X_OK):
+                    cmd[0] = repo_cand
+            try:
+                subprocess.Popen(cmd, start_new_session=True)
+            except Exception as e:
+                print(f"Failed to launch {cmd}: {e}")
+        GLib.timeout_add(120, self.destroy)
+
+
+def main():
+    GLib.set_prgname("omniq-spotlight")
+    if "--test" in sys.argv:
+        assert len(SYSTEM_ITEMS) >= 20
+        assert find_icon("spotlight_16.png") is not None
+        print("[+] omniq-spotlight headless self-test passed.")
+        return 0
+
+    GLib.set_application_name("OmniQ Spotlight")
+    win = SpotlightWindow()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

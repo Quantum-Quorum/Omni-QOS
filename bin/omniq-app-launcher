@@ -1,0 +1,911 @@
+#!/usr/bin/env python3
+"""
+=============================================================================
+OmniQ-OS: Real-Time Quantum Linux - Glassmorphic Application Launcher
+Component: bin/omniq-app-launcher
+Categorized Quantum & OS Application Catalog, Recent Apps & Window Switcher
+=============================================================================
+"""
+
+import os
+import sys
+import json
+import shlex
+import shutil
+import subprocess
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RECENT_FILE = os.path.expanduser("~/.cache/omniq/recent_apps.json")
+
+ICON_SEARCH_PATHS = [
+    "/usr/share/omniq/icons",
+    "/etc/omniq/icons",
+    os.path.join(REPO_ROOT, "etc/omniq/icons"),
+    "/usr/share/pixmaps",
+    "/usr/share/icons",
+]
+
+
+def find_icon(name):
+    for p in ICON_SEARCH_PATHS:
+        f = os.path.join(p, name)
+        if os.path.exists(f):
+            return f
+    return None
+
+
+def find_wmctrl():
+    repo_wm = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wmctrl")
+    for c in ["/usr/local/bin/wmctrl", "/usr/bin/wmctrl", "/bin/wmctrl", repo_wm]:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return shutil.which("wmctrl")
+
+
+ALL_APPS = [
+    # 1. Quantum & QPU
+    {
+        "id": "cryo_lab",
+        "name": "Cryogenic Dilution Lab",
+        "cmd": "/usr/local/bin/omniq-cryo-lab",
+        "icon": "cryo_lab_48.png",
+        "icon_alt": "cryo_lab_24.png",
+        "category": "Quantum & QPU",
+        "desc": "Live SCPI Lake Shore 372, R&S LO, Bluefors REST & binary Modbus/TCP cryo console",
+    },
+    {
+        "id": "cockpit",
+        "name": "Quantum Mission Cockpit",
+        "cmd": "/usr/local/bin/omniq-gui",
+        "icon": "cockpit_48.png",
+        "icon_alt": "cockpit_24.png",
+        "category": "Quantum & QPU",
+        "desc": "Real-time cryostat telemetry, QMMU spatial matrix & GPUDirect-QPU DMA HUD",
+    },
+    {
+        "id": "circuit_maker",
+        "name": "Quantum Circuit Maker",
+        "cmd": "/usr/local/bin/omniq-circuit-maker",
+        "icon": "circuit_maker_48.png",
+        "icon_alt": "circuit_maker_24.png",
+        "category": "Quantum & QPU",
+        "desc": "Visual OpenQASM 2.0/3.0 circuit studio, unitary composer & DRAG pulse preview",
+    },
+    {
+        "id": "hilbert",
+        "name": "Hilbert Space Explorer",
+        "cmd": "/usr/local/bin/omniq-hilbert-space",
+        "icon": "hilbert_48.png",
+        "icon_alt": "hilbert_24.png",
+        "category": "Quantum & QPU",
+        "desc": "Interactive 3D Bloch sphere, density matrix & entanglement entropy visualizer",
+    },
+    {
+        "id": "debugger",
+        "name": "Quantum Step Debugger",
+        "cmd": "/usr/local/bin/omniq-debugger",
+        "icon": "debugger_48.png",
+        "icon_alt": "debugger_24.png",
+        "category": "Quantum & QPU",
+        "desc": "Gate-by-gate statevector stepper, phase wheel & amplitude probability inspector",
+    },
+    {
+        "id": "qpu_3d",
+        "name": "3D Cryogenic QPU Viewer",
+        "cmd": "/usr/local/bin/omniq-qpu-3d",
+        "icon": "qpu_3d_48.png",
+        "icon_alt": "qpu_3d_24.png",
+        "category": "Quantum & QPU",
+        "desc": "5-stage dilution refrigerator chandelier & 128-qubit Heavy-Hex coupler graph",
+    },
+    {
+        "id": "qpu_smi",
+        "name": "QPU-SMI Telemetry HUD",
+        "cmd": "/usr/local/bin/omniq-terminal -e \"qpu-smi --watch\"",
+        "icon": "terminal_48.png",
+        "icon_alt": "terminal_24.png",
+        "category": "Quantum & QPU",
+        "desc": "Live ANSI terminal telemetry for transmon coherence, T1/T2 & cryo stages",
+    },
+
+    # 2. QEC & Algorithms
+    {
+        "id": "qec",
+        "name": "Surface Code QEC Decoder",
+        "cmd": "/usr/local/bin/omniq-qec",
+        "icon": "qec_48.png",
+        "icon_alt": "qec_24.png",
+        "category": "QEC & Algorithms",
+        "desc": "Sub-600ns Minimum Weight Perfect Matching stabilizer syndrome decoder",
+    },
+    {
+        "id": "vqe_chem",
+        "name": "VQE Molecular Chemistry",
+        "cmd": "/usr/local/bin/omniq-vqe-chem",
+        "icon": "vqe_chem_48.png",
+        "icon_alt": "vqe_chem_24.png",
+        "category": "QEC & Algorithms",
+        "desc": "Variational Quantum Eigensolver potential energy surfaces for H2, LiH & BeH2",
+    },
+
+    # 3. Security & PQC
+    {
+        "id": "pqc_audit",
+        "name": "PQC & SOC 2 Security Audit",
+        "cmd": "/usr/local/bin/omniq-pqc-audit",
+        "icon": "pqc_audit_48.png",
+        "icon_alt": "pqc_audit_24.png",
+        "category": "Security & PQC",
+        "desc": "NIST FIPS 203/204 (ML-KEM-1024 / ML-DSA-87) & SOC 2 Type II compliance suite",
+    },
+    {
+        "id": "ports",
+        "name": "Ports & RFSoC Network",
+        "cmd": "/usr/local/bin/omniq-ports",
+        "icon": "ports_48.png",
+        "icon_alt": "ports_24.png",
+        "category": "Security & PQC",
+        "desc": "Active TCP/UDP sockets, omniqd IPC, PQC API port 9443 & link diagnostics",
+    },
+    {
+        "id": "lock",
+        "name": "Lock Quantum Session",
+        "cmd": "/usr/local/bin/omniq-screensaver --lock",
+        "icon": "lock_48.png",
+        "icon_alt": "lock_24.png",
+        "category": "Security & PQC",
+        "desc": "Immediate workstation screen lock with passphrase verification",
+    },
+
+    # 4. Development & Files
+    {
+        "id": "terminal",
+        "name": "OmniQ Power Terminal",
+        "cmd": "/usr/local/bin/omniq-terminal",
+        "icon": "terminal_48.png",
+        "icon_alt": "terminal_24.png",
+        "category": "Development & Files",
+        "desc": "Tiled multi-pane developer console with Quantum aliases & PREEMPT_RT prompt",
+    },
+    {
+        "id": "editor",
+        "name": "OpenQASM & Code Editor",
+        "cmd": "/usr/local/bin/omniq-edit",
+        "icon": "editor_48.png",
+        "icon_alt": "editor_24.png",
+        "category": "Development & Files",
+        "desc": "Syntax-highlighted dark editor for OpenQASM, Python, C++ & JSON configs",
+    },
+    {
+        "id": "files",
+        "name": "OmniQ File & Circuit Manager",
+        "cmd": "/usr/local/bin/omniq-files /root/circuits",
+        "icon": "files_48.png",
+        "icon_alt": "files_24.png",
+        "category": "Development & Files",
+        "desc": "Fast file manager with quick access to /root/circuits OpenQASM programs",
+    },
+    {
+        "id": "browser",
+        "name": "Quantum Web & Docs Browser",
+        "cmd": "/usr/local/bin/omniq-browser",
+        "icon": "browser_48.png",
+        "icon_alt": "browser_24.png",
+        "category": "Development & Files",
+        "desc": "Lightweight research browser for quantum documentation & arXiv preprints",
+    },
+
+    # 5. System & Hardware
+    {
+        "id": "settings",
+        "name": "System Settings",
+        "cmd": "/usr/local/bin/omniq-settings",
+        "icon": "settings_48.png",
+        "icon_alt": "settings_24.png",
+        "category": "System & Hardware",
+        "desc": "Configure displays, audio, network, QPU driver states & RT CPU isolation",
+    },
+    {
+        "id": "control_panel",
+        "name": "Control Center HUD",
+        "cmd": "/usr/local/bin/omniq-control-panel",
+        "icon": "control_center_48.png",
+        "icon_alt": "control_center_24.png",
+        "category": "System & Hardware",
+        "desc": "Quick toggles, Tri-Compute Synergy, sliders & Cryo/Quantum alert center",
+    },
+    {
+        "id": "tasks",
+        "name": "Real-Time Task Monitor",
+        "cmd": "/usr/local/bin/omniq-tasks",
+        "icon": "tasks_48.png",
+        "icon_alt": "tasks_24.png",
+        "category": "System & Hardware",
+        "desc": "CPU/RAM telemetry, SCHED_FIFO real-time threads & active QMMU tenant PIDs",
+    },
+    {
+        "id": "disks",
+        "name": "Disks & Storage Manager",
+        "cmd": "/usr/local/bin/omniq-disks",
+        "icon": "disks_48.png",
+        "icon_alt": "disks_24.png",
+        "category": "System & Hardware",
+        "desc": "NVMe/SATA partition map, filesystem usage & mount health",
+    },
+    {
+        "id": "installer",
+        "name": "OmniQ Disk Installer",
+        "cmd": "/usr/local/bin/omniq-installer",
+        "icon": "installer_48.png",
+        "icon_alt": "installer_24.png",
+        "category": "System & Hardware",
+        "desc": "Guided GPT/UEFI permanent installation to NVMe or SATA drives",
+    },
+    {
+        "id": "wallpaper",
+        "name": "Quantum Wallpaper Gallery",
+        "cmd": "/usr/local/bin/omniq-wallpaper --gui",
+        "icon": "wallpaper_48.png",
+        "icon_alt": "wallpaper_24.png",
+        "category": "System & Hardware",
+        "desc": "Choose from 6 high-DPI 1080p Quantum & Cryostat desktop wallpapers",
+    },
+    {
+        "id": "display",
+        "name": "HDMI & Display Switcher",
+        "cmd": "/usr/local/bin/omniq-display-switcher",
+        "icon": "screensaver_48.png",
+        "icon_alt": "screensaver_24.png",
+        "category": "System & Hardware",
+        "desc": "Multi-monitor xrandr mirror, extend & output configuration",
+    },
+    {
+        "id": "screenshot",
+        "name": "Screen Capture Utility",
+        "cmd": "/usr/local/bin/omniq-screenshot",
+        "icon": "screenshot_48.png",
+        "icon_alt": "screenshot_24.png",
+        "category": "System & Hardware",
+        "desc": "Instant fullscreen or focused window PNG capture & clipboard sync",
+    },
+    {
+        "id": "power",
+        "name": "Power & Session Control",
+        "cmd": "/usr/local/bin/omniq-power",
+        "icon": "power_48.png",
+        "icon_alt": "power_24.png",
+        "category": "System & Hardware",
+        "desc": "Clean kernel poweroff, reboot, ACPI S3 suspend & session controls",
+    },
+]
+
+CSS = """
+window {
+    background-color: #0D0B18;
+    color: #EDEAF5;
+}
+
+.launcher-frame {
+    background-color: #0D0B18;
+    border: 2px solid #8A4FFF;
+    border-radius: 16px;
+    padding: 20px 24px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.95), 0 0 28px rgba(138, 79, 255, 0.42);
+}
+
+.header-title {
+    font-size: 20px;
+    font-weight: 900;
+    color: #FFFFFF;
+}
+
+.header-sub {
+    font-size: 11px;
+    color: #9E97B8;
+}
+
+entry.search-box {
+    background-color: #141126;
+    background-image: none;
+    border: 2px solid #00E5FF;
+    border-radius: 10px;
+    color: #FFFFFF;
+    font-size: 13px;
+    font-weight: bold;
+    padding: 10px 16px;
+    margin-top: 10px;
+    margin-bottom: 12px;
+    caret-color: #00E5FF;
+}
+
+entry.search-box:focus {
+    border-color: #00FF9D;
+    box-shadow: 0 0 14px rgba(0, 229, 255, 0.45);
+}
+
+.section-label {
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    color: #00E5FF;
+    margin-top: 4px;
+    margin-bottom: 6px;
+}
+
+button {
+    background: #141126;
+    background-color: #141126;
+    background-image: none;
+    border: 1px solid rgba(138, 79, 255, 0.35);
+    box-shadow: none;
+    text-shadow: none;
+    outline: none;
+}
+
+button label {
+    color: #EDEAF5;
+}
+
+button.recent-card {
+    background: #141126;
+    background-color: #141126;
+    background-image: none;
+    border: 1px solid rgba(138, 79, 255, 0.42);
+    border-radius: 20px;
+    padding: 6px 14px;
+}
+
+button.recent-card label {
+    font-size: 11px;
+    font-weight: bold;
+    color: #EDEAF5;
+}
+
+button.recent-card:hover {
+    background: #1A1530;
+    background-color: #1A1530;
+    border-color: #00E5FF;
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.42);
+}
+
+button.category-tab {
+    background: #141126;
+    background-color: #141126;
+    background-image: none;
+    border: 1px solid rgba(138, 79, 255, 0.35);
+    border-radius: 8px;
+    padding: 7px 14px;
+}
+
+button.category-tab label {
+    font-size: 11px;
+    font-weight: bold;
+    color: #9E97B8;
+}
+
+button.category-tab:hover {
+    background: #1A1530;
+    background-color: #1A1530;
+    border-color: #8A4FFF;
+}
+
+button.category-tab:hover label {
+    color: #FFFFFF;
+}
+
+button.category-tab.active-tab {
+    background: linear-gradient(135deg, #8A4FFF, #00E5FF);
+    border-color: transparent;
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.50);
+}
+
+button.category-tab.active-tab label {
+    color: #FFFFFF;
+    font-weight: 900;
+}
+
+button.app-card, .window-card {
+    background: #141126;
+    background-color: #141126;
+    background-image: none;
+    border: 1px solid rgba(138, 79, 255, 0.35);
+    border-radius: 12px;
+    padding: 12px 14px;
+}
+
+button.app-card:hover {
+    background: #1A1530;
+    background-color: #1A1530;
+    border-color: #00E5FF;
+    box-shadow: 0 0 16px rgba(0, 229, 255, 0.35);
+}
+
+.app-title {
+    font-size: 13px;
+    font-weight: bold;
+    color: #FFFFFF;
+}
+
+.app-desc {
+    font-size: 10px;
+    color: #A5A0C2;
+}
+
+.app-badge {
+    font-size: 9px;
+    font-weight: bold;
+    color: #00E5FF;
+    border: 1px solid rgba(0, 229, 255, 0.5);
+    border-radius: 4px;
+    padding: 2px 7px;
+    background-color: rgba(0, 229, 255, 0.12);
+}
+
+button.close-btn {
+    background: #1A1530;
+    background-color: #1A1530;
+    border: 1px solid #FF3366;
+    border-radius: 8px;
+    padding: 4px 12px;
+}
+
+button.close-btn label {
+    color: #FF3366;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+button.close-btn:hover {
+    background: #FF3366;
+    background-color: #FF3366;
+}
+
+button.close-btn:hover label {
+    color: #FFFFFF;
+}
+
+scrolledwindow, viewport {
+    background: transparent;
+    background-color: transparent;
+    border: none;
+}
+
+scrollbar slider {
+    background-color: rgba(138, 79, 255, 0.50);
+    border-radius: 6px;
+    min-width: 6px;
+    min-height: 24px;
+}
+
+scrollbar slider:hover {
+    background-color: #00E5FF;
+}
+"""
+
+
+class AppLauncherWindow(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_title("OmniQ Applications")
+        self.set_wmclass("omniq-app-launcher", "Omniq-app-launcher")
+        self.set_default_size(980, 680)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.set_decorated(False)
+        self.set_modal(True)
+
+        gtk_settings = Gtk.Settings.get_default()
+        if gtk_settings:
+            gtk_settings.set_property("gtk-theme-name", "Adwaita-dark")
+            gtk_settings.set_property("gtk-application-prefer-dark-theme", True)
+
+        icon_path = find_icon("apps_grid_48.png") or find_icon("omniq-logo_48.png")
+        if icon_path:
+            try:
+                self.set_icon_from_file(icon_path)
+            except Exception:
+                pass
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS.encode("utf-8"))
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_USER,
+        )
+
+        self.connect("key-press-event", self._on_key_press)
+
+        self.recent_app_ids = self._load_recent_apps()
+        self.current_category = "All"
+        self.search_query = ""
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        outer.get_style_context().add_class("launcher-frame")
+        self.add(outer)
+
+        hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        logo_path = find_icon("omniq-logo_48.png") or find_icon("omniq-logo.png")
+        if logo_path:
+            hdr.pack_start(Gtk.Image.new_from_file(logo_path), False, False, 0)
+
+        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        title_lbl = Gtk.Label(label="OmniQ Applications")
+        title_lbl.set_xalign(0.0)
+        title_lbl.get_style_context().add_class("header-title")
+        title_box.pack_start(title_lbl, False, False, 0)
+
+        sub_lbl = Gtk.Label(
+            label="Real-Time Quantum Workstation  |  Application Catalog & Active Window Switcher"
+        )
+        sub_lbl.set_xalign(0.0)
+        sub_lbl.get_style_context().add_class("header-sub")
+        title_box.pack_start(sub_lbl, False, False, 0)
+        hdr.pack_start(title_box, True, True, 0)
+
+        close_btn = Gtk.Button(label="Close")
+        close_btn.get_style_context().add_class("close-btn")
+        close_btn.connect("clicked", lambda _b: self.close())
+        hdr.pack_end(close_btn, False, False, 0)
+        outer.pack_start(hdr, False, False, 0)
+
+        self.search_entry = Gtk.Entry()
+        self.search_entry.set_placeholder_text(
+            "Filter Quantum apps, QEC, VQE, PQC, or system tools... (Type to filter, Enter to launch)"
+        )
+        sp_ic = find_icon("spotlight_16.png")
+        if sp_ic:
+            try:
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(sp_ic, 16, 16, True)
+                self.search_entry.set_icon_from_pixbuf(Gtk.EntryIconPosition.PRIMARY, pix)
+            except Exception:
+                pass
+        self.search_entry.get_style_context().add_class("search-box")
+        self.search_entry.connect("changed", self._on_search_changed)
+        self.search_entry.connect("activate", self._on_search_activated)
+        outer.pack_start(self.search_entry, False, False, 0)
+
+        self.recent_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        lbl_recent = Gtk.Label(label="RECENTLY USED APPLICATIONS")
+        lbl_recent.set_xalign(0.0)
+        lbl_recent.get_style_context().add_class("section-label")
+        self.recent_box.pack_start(lbl_recent, False, False, 0)
+
+        self.recent_flow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self._populate_recent_apps()
+        self.recent_box.pack_start(self.recent_flow, False, False, 4)
+        outer.pack_start(self.recent_box, False, False, 0)
+
+        cat_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        cat_bar.set_margin_top(8)
+        cat_bar.set_margin_bottom(8)
+
+        categories = [
+            "All",
+            "Active Windows",
+            "Quantum & QPU",
+            "QEC & Algorithms",
+            "Security & PQC",
+            "Development & Files",
+            "System & Hardware",
+        ]
+        self.cat_buttons = []
+        for cat in categories:
+            btn = Gtk.Button(label=cat)
+            btn.get_style_context().add_class("category-tab")
+            if cat == "All":
+                btn.get_style_context().add_class("active-tab")
+            btn.connect("clicked", self._on_category_tab_clicked, cat)
+            cat_bar.pack_start(btn, False, False, 0)
+            self.cat_buttons.append((cat, btn))
+        outer.pack_start(cat_bar, False, False, 0)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+
+        self.grid_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.grid_container.set_margin_top(6)
+        self.grid_container.set_margin_bottom(6)
+        scroller.add(self.grid_container)
+        outer.pack_start(scroller, True, True, 0)
+
+        self._render_app_grid()
+
+    def _load_recent_apps(self):
+        default_recent = ["cockpit", "circuit_maker", "hilbert", "qec", "terminal"]
+        if os.path.exists(RECENT_FILE):
+            try:
+                with open(RECENT_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list) and data:
+                    return data
+            except Exception:
+                pass
+        return default_recent
+
+    def _save_recent_app(self, app_id):
+        try:
+            os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
+            recents = [app_id] + [x for x in self.recent_app_ids if x != app_id]
+            with open(RECENT_FILE, "w", encoding="utf-8") as f:
+                json.dump(recents[:6], f)
+        except Exception:
+            pass
+
+    def _populate_recent_apps(self):
+        for ch in self.recent_flow.get_children():
+            self.recent_flow.remove(ch)
+
+        apps_map = {a["id"]: a for a in ALL_APPS}
+        added = 0
+        for app_id in self.recent_app_ids:
+            if app_id in apps_map:
+                app = apps_map[app_id]
+                btn = Gtk.Button()
+                btn.get_style_context().add_class("recent-card")
+                btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+
+                ic_path = find_icon(app.get("icon_alt", "omniq-logo_24.png")) or find_icon(app["icon"])
+                if ic_path:
+                    btn_box.pack_start(Gtk.Image.new_from_file(ic_path), False, False, 0)
+
+                lbl = Gtk.Label(label=app["name"])
+                lbl.set_xalign(0.0)
+                btn_box.pack_start(lbl, False, False, 0)
+
+                btn.add(btn_box)
+                btn.connect("clicked", lambda _b, a=app: self._launch_app(a))
+                self.recent_flow.pack_start(btn, False, False, 0)
+                added += 1
+                if added >= 5:
+                    break
+        self.recent_flow.show_all()
+
+    def _get_open_windows(self):
+        windows = []
+        wmctrl = find_wmctrl()
+        if wmctrl:
+            try:
+                res = subprocess.run([wmctrl, "-l", "-p", "-x"], capture_output=True, text=True, timeout=1)
+                if res.returncode == 0:
+                    for line in res.stdout.splitlines():
+                        parts = line.split(None, 4)
+                        if len(parts) >= 5:
+                            wid, pid, wclass, title = parts[0], parts[2], parts[3].split(".")[0], parts[4]
+                            if any(x in wclass.lower() for x in ["desktop", "panel", "tray", "jwm", "backdrop"]):
+                                continue
+                            if "OmniQ Desktop Workspace" in title or "omniq-app-launcher" in wclass.lower():
+                                continue
+                            windows.append({"id": wid, "class": wclass, "title": title, "pid": pid})
+            except Exception:
+                pass
+        return windows
+
+    def _switch_to_window(self, wid):
+        wmctrl = find_wmctrl()
+        if wmctrl:
+            try:
+                subprocess.run([wmctrl, "-i", "-a", wid], timeout=1)
+            except Exception:
+                pass
+        self.close()
+
+    def _close_window(self, wid):
+        wmctrl = find_wmctrl()
+        if wmctrl:
+            try:
+                subprocess.run([wmctrl, "-i", "-c", wid], timeout=1)
+            except Exception:
+                pass
+        GLib.timeout_add(150, self._render_app_grid)
+
+    def _render_window_switcher(self):
+        windows = self._get_open_windows()
+        if not windows:
+            no_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            no_box.set_margin_top(40)
+            no_box.set_margin_bottom(40)
+            lbl = Gtk.Label(label="No other active application windows are currently open.")
+            lbl.set_xalign(0.5)
+            lbl.get_style_context().add_class("header-sub")
+            no_box.pack_start(lbl, False, False, 0)
+            self.grid_container.pack_start(no_box, False, False, 0)
+            self.grid_container.show_all()
+            return
+
+        grid = Gtk.Grid()
+        grid.set_column_spacing(12)
+        grid.set_row_spacing(10)
+        grid.set_column_homogeneous(True)
+
+        for idx, win in enumerate(windows):
+            card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            card.get_style_context().add_class("window-card")
+
+            btn_click = Gtk.Button()
+            btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+
+            ic_name = win["class"].lower().replace("omniq-", "")
+            ic_path = find_icon(f"{ic_name}_48.png") or find_icon("omniq-logo_48.png")
+            if ic_path:
+                btn_box.pack_start(Gtk.Image.new_from_file(ic_path), False, False, 0)
+
+            text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            title_lbl = Gtk.Label(label=win["title"][:42])
+            title_lbl.set_xalign(0.0)
+            title_lbl.get_style_context().add_class("app-title")
+            top_row.pack_start(title_lbl, True, True, 0)
+
+            badge = Gtk.Label(label=f"WIN {win['id']}")
+            badge.get_style_context().add_class("app-badge")
+            top_row.pack_end(badge, False, False, 0)
+            text_box.pack_start(top_row, False, False, 0)
+
+            desc_lbl = Gtk.Label(label=f"Class: {win['class']}  |  PID: {win['pid']}")
+            desc_lbl.set_xalign(0.0)
+            desc_lbl.get_style_context().add_class("app-desc")
+            text_box.pack_start(desc_lbl, False, False, 0)
+
+            btn_box.pack_start(text_box, True, True, 0)
+            btn_click.add(btn_box)
+            btn_click.connect("clicked", lambda _b, wid=win["id"]: self._switch_to_window(wid))
+            card.pack_start(btn_click, True, True, 0)
+
+            close_btn = Gtk.Button(label="Close")
+            close_btn.set_margin_start(4)
+            close_btn.get_style_context().add_class("close-btn")
+            close_btn.connect("clicked", lambda _b, wid=win["id"]: self._close_window(wid))
+            card.pack_end(close_btn, False, False, 0)
+
+            grid.attach(card, idx % 2, idx // 2, 1, 1)
+
+        self.grid_container.pack_start(grid, False, False, 0)
+        self.grid_container.show_all()
+
+    def _render_app_grid(self):
+        for ch in self.grid_container.get_children():
+            self.grid_container.remove(ch)
+
+        if self.current_category == "Active Windows":
+            self._render_window_switcher()
+            return
+
+        query = self.search_query.lower().strip()
+        filtered = []
+        for a in ALL_APPS:
+            if self.current_category != "All" and a["category"] != self.current_category:
+                continue
+            if query and not (
+                query in a["name"].lower()
+                or query in a["desc"].lower()
+                or query in a["category"].lower()
+                or query in a["id"].lower()
+            ):
+                continue
+            filtered.append(a)
+
+        if not filtered:
+            no_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            no_box.set_margin_top(40)
+            no_box.set_margin_bottom(40)
+            lbl = Gtk.Label(label=f"No applications matched '{self.search_query}'")
+            lbl.set_xalign(0.5)
+            lbl.get_style_context().add_class("header-sub")
+            no_box.pack_start(lbl, False, False, 0)
+            self.grid_container.pack_start(no_box, False, False, 0)
+            self.grid_container.show_all()
+            return
+
+        grid = Gtk.Grid()
+        grid.set_column_spacing(12)
+        grid.set_row_spacing(10)
+        grid.set_column_homogeneous(True)
+
+        for idx, app in enumerate(filtered):
+            card = Gtk.Button()
+            card.get_style_context().add_class("app-card")
+            card_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+
+            ic_path = find_icon(app["icon"]) or find_icon(app.get("icon_alt", "omniq-logo_48.png"))
+            if ic_path:
+                card_box.pack_start(Gtk.Image.new_from_file(ic_path), False, False, 0)
+
+            text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            title_lbl = Gtk.Label(label=app["name"])
+            title_lbl.set_xalign(0.0)
+            title_lbl.get_style_context().add_class("app-title")
+            top_row.pack_start(title_lbl, True, True, 0)
+
+            badge = Gtk.Label(label=app["category"])
+            badge.get_style_context().add_class("app-badge")
+            top_row.pack_end(badge, False, False, 0)
+            text_box.pack_start(top_row, False, False, 0)
+
+            desc_lbl = Gtk.Label(label=app["desc"])
+            desc_lbl.set_xalign(0.0)
+            desc_lbl.set_line_wrap(True)
+            desc_lbl.get_style_context().add_class("app-desc")
+            text_box.pack_start(desc_lbl, False, False, 0)
+
+            card_box.pack_start(text_box, True, True, 0)
+            card.add(card_box)
+            card.connect("clicked", lambda _b, a=app: self._launch_app(a))
+            grid.attach(card, idx % 2, idx // 2, 1, 1)
+
+        self.grid_container.pack_start(grid, False, False, 0)
+        self.grid_container.show_all()
+
+    def _on_category_tab_clicked(self, _btn, cat):
+        self.current_category = cat
+        for c, b in self.cat_buttons:
+            if c == cat:
+                b.get_style_context().add_class("active-tab")
+            else:
+                b.get_style_context().remove_class("active-tab")
+        self._render_app_grid()
+
+    def _on_search_changed(self, entry):
+        self.search_query = entry.get_text()
+        self.recent_box.set_visible(not bool(self.search_query))
+        self._render_app_grid()
+
+    def _on_search_activated(self, _entry):
+        query = self.search_query.lower().strip()
+        if not query:
+            return
+        for a in ALL_APPS:
+            if self.current_category != "All" and a["category"] != self.current_category:
+                continue
+            if query in a["name"].lower() or query in a["desc"].lower() or query in a["id"].lower():
+                self._launch_app(a)
+                return
+
+    def _on_key_press(self, _widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
+        return False
+
+    def _launch_app(self, app):
+        self._save_recent_app(app["id"])
+        cmd_args = shlex.split(app["cmd"]) if isinstance(app["cmd"], str) else list(app["cmd"])
+        if cmd_args:
+            exe = cmd_args[0]
+            base = os.path.basename(exe)
+            repo_cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), base)
+            if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+                cmd_args[0] = shutil.which(base) or (repo_cand if os.path.isfile(repo_cand) else exe)
+            try:
+                subprocess.Popen(cmd_args, shell=False, start_new_session=True)
+            except Exception as e:
+                print(f"[!] Error launching {cmd_args}: {e}")
+        GLib.timeout_add(120, self.close)
+
+
+def main():
+    GLib.set_prgname("omniq-app-launcher")
+    if "--test" in sys.argv:
+        assert len(ALL_APPS) >= 20
+        assert find_icon("omniq-logo_48.png") is not None
+        print("[+] omniq-app-launcher headless self-test passed.")
+        return 0
+
+    GLib.set_application_name("OmniQ Applications")
+    win = AppLauncherWindow()
+    if "--switcher" in sys.argv:
+        win._on_category_tab_clicked(None, "Active Windows")
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
