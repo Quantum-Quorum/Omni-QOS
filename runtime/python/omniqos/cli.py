@@ -1,8 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-"""
-OmniQ-OS: Unified CLI (qpu)
-"""
-
 import sys
 import argparse
 from .core import QPU
@@ -12,20 +7,16 @@ def main():
     parser = argparse.ArgumentParser(prog="qpu", description="OmniQ-OS Quantum Processing Unit Control CLI")
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand to execute")
 
-    # qpu info
     subparsers.add_parser("info", help="Display QPU topology and cryogenic status")
 
-    # qpu run <file>
     run_parser = subparsers.add_parser("run", help="Execute an OpenQASM circuit file on QPU")
     run_parser.add_argument("file", help="Path to .qasm file")
     run_parser.add_argument("-s", "--shots", type=int, default=1000, help="Shot count")
     run_parser.add_argument("-d", "--debug", action="store_true", help="Launch 3D GUI debugger")
 
-    # qpu reset <qubit_id>
     reset_parser = subparsers.add_parser("reset", help="Reset physical qubit to |0>")
     reset_parser.add_argument("qubit", type=int, help="Physical qubit ID")
 
-    # qpu studio
     subparsers.add_parser("studio", help="Launch interactive Quantum Assembly Studio")
 
     args = parser.parse_args()

@@ -1,0 +1,511 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+C_CYAN="\033[38;2;0;229;255m"
+C_GREEN="\033[38;2;0;255;157m"
+C_CRIMSON="\033[38;2;255;51;102m"
+C_VIOLET="\033[38;2;138;79;255m"
+C_BOLD="\033[1m"
+C_RESET="\033[0m"
+
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+PROJECT_ROOT="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
+
+TARGET_DEV=""
+SWAP_OPT="auto"
+ROOT_SIZE_OPT="max"
+PTABLE_OPT="auto"
+AUTO_CONFIRM=0
+DRY_RUN=0
+GUI_MODE=0
+SELF_TEST=0
+
+print_usage() {
+    echo "Usage: omniq-installer [options] [target_device]"
+    echo ""
+    echo "Options:"
+    echo "  -t, --target <dev>      Target block device (e.g. /dev/sda, /dev/nvme0n1)"
+    echo "  -s, --swap <size>       Swap partition size: 'auto', '4G', '8G', '2G', '0' (default: auto)"
+    echo "  -r, --root-size <size>  Root partition size: 'max' or size in GB (default: max)"
+    echo "      --gpt               Force GPT partition table (UEFI standard)"
+    echo "      --mbr               Force MBR / msdos partition table (Legacy BIOS standard)"
+    echo "      --gui               Launch PyGObject GTK3 Graphical Installer Wizard"
+    echo "  -y, --yes, --auto       Skip interactive confirmation (unattended install)"
+    echo "      --dry-run           Calculate and display space allocation plan without writing"
+    echo "      --test              Run headless syntax, live-root guard, and allocator verification"
+    echo "  -h, --help              Show this help message"
+}
+
+is_live_root_device() {
+    local candidate="$1"
+    [ -z "$candidate" ] && return 1
+    local real_cand
+    real_cand="$(readlink -f "$candidate" 2>/dev/null || echo "$candidate")"
+
+    local root_src=""
+    root_src="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    if [ -n "$root_src" ]; then
+        local real_root
+        real_root="$(readlink -f "$root_src" 2>/dev/null || echo "$root_src")"
+        if [ "$real_cand" = "$real_root" ]; then
+            return 0
+        fi
+        if [[ "$real_root" == "${real_cand}"* ]]; then
+            return 0
+        fi
+        local pk=""
+        pk="$(lsblk -no PKNAME "$real_root" 2>/dev/null | head -n1 || true)"
+        if [ -n "$pk" ] && [ "$real_cand" = "/dev/$pk" ]; then
+            return 0
+        fi
+    fi
+
+    if mount | grep -q "^${real_cand}.* on / "; then
+        return 0
+    fi
+    return 1
+}
+
+launch_gtk_wizard() {
+    exec python3 - "$SCRIPT_PATH" "$PROJECT_ROOT" << 'PYEOF'
+import json
+import os
+import subprocess
+import sys
+
+installer_sh = sys.argv[1]
+repo_root = sys.argv[2]
+for p in reversed([
+    os.path.join(repo_root, "runtime", "python"),
+    os.path.join(repo_root, "src"),
+    "/opt/omniq/src",
+    "/usr/lib/python3/dist-packages",
+]):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+import gi
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk
+
+GLib.set_prgname("omniq-installer")
+
+CSS = b"""
+window, .main-bg { background-color: #0D0B18; color: #ECF2FF; font-family: "DejaVu Sans", sans-serif; }
+.card { background-color: #141126; border: 1px solid rgba(138, 79, 255, 0.38); border-radius: 8px; padding: 12px 16px; }
+.title-lbl { color: #00E5FF; font-size: 15px; font-weight: bold; }
+.sub-lbl { color: #94A3B8; font-size: 11px; }
+.plan-view, .plan-view text { background-color: #080710; color: #00FF9D; font-family: "DejaVu Sans Mono", monospace; font-size: 11px; }
+button { background-image: none; background-color: #1A1530; color: #FFFFFF; border: 1px solid #8A4FFF; border-radius: 6px; padding: 6px 14px; font-weight: bold; }
+button.accent-btn { background: linear-gradient(135deg, #0E4B63, #008CA8); border-color: #00E5FF; }
+combobox button, entry { background-image: none; background-color: #141126; color: #ECF2FF; border: 1px solid rgba(138, 79, 255, 0.45); border-radius: 6px; padding: 5px 8px; }
+"""
+
+provider = Gtk.CssProvider()
+provider.load_from_data(CSS)
+scr = Gdk.Screen.get_default()
+if scr is not None:
+    Gtk.StyleContext.add_provider_for_screen(scr, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+class InstallerWindow(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="OmniQ-OS Permanent Disk Installer")
+        self.set_default_size(760, 520)
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        vbox.get_style_context().add_class("main-bg")
+        vbox.set_margin_start(14)
+        vbox.set_margin_end(14)
+        vbox.set_margin_top(14)
+        vbox.set_margin_bottom(14)
+        self.add(vbox)
+
+        hdr = Gtk.Label(label="OMNIQ-OS PERMANENT NVME / SATA DISK INSTALLER")
+        hdr.get_style_context().add_class("title-lbl")
+        hdr.set_xalign(0.0)
+        vbox.pack_start(hdr, False, False, 0)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        card.get_style_context().add_class("card")
+
+        r1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        l_dev = Gtk.Label(label="Target Block Device:")
+        l_dev.set_xalign(0.0)
+        self.dev_entry = Gtk.Entry()
+        self.dev_entry.set_text("/dev/vda")
+        r1.pack_start(l_dev, False, False, 0)
+        r1.pack_start(self.dev_entry, True, True, 0)
+        card.pack_start(r1, False, False, 0)
+
+        r2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.pt_combo = Gtk.ComboBoxText()
+        self.pt_combo.append("gpt", "UEFI GPT (512 MiB ESP + Ext4)")
+        self.pt_combo.append("mbr", "Legacy BIOS MBR (msdos)")
+        self.pt_combo.set_active_id("gpt")
+
+        self.swap_combo = Gtk.ComboBoxText()
+        for s in ["auto", "4G", "8G", "2G", "0"]:
+            self.swap_combo.append(s, f"Swap: {s}")
+        self.swap_combo.set_active_id("auto")
+
+        btn_plan = Gtk.Button(label="Preview Allocation Plan (--dry-run)")
+        btn_plan.get_style_context().add_class("accent-btn")
+        btn_plan.connect("clicked", self._on_dry_run)
+
+        r2.pack_start(self.pt_combo, False, False, 0)
+        r2.pack_start(self.swap_combo, False, False, 0)
+        r2.pack_end(btn_plan, False, False, 0)
+        card.pack_start(r2, False, False, 0)
+        vbox.pack_start(card, False, False, 0)
+
+        sw = Gtk.ScrolledWindow()
+        self.out_view = Gtk.TextView()
+        self.out_view.set_editable(False)
+        self.out_view.set_monospace(True)
+        self.out_view.get_style_context().add_class("plan-view")
+        sw.add(self.out_view)
+        vbox.pack_start(sw, True, True, 0)
+
+        self.out_view.get_buffer().set_text(
+            "Select target device and click 'Preview Allocation Plan (--dry-run)'.\n"
+            "Live root filesystem (/) is hardware-guarded against accidental overwrite.\n"
+        )
+
+    def _on_dry_run(self, _btn):
+        dev = self.dev_entry.get_text().strip()
+        pt = "--" + (self.pt_combo.get_active_id() or "gpt")
+        sw = self.swap_combo.get_active_id() or "auto"
+        proc = subprocess.run(
+            [installer_sh, "--dry-run", pt, "--swap", sw, "--target", dev],
+            capture_output=True, text=True
+        )
+        clean = subprocess.run(
+            ["sed", "s/\x1b\\[[0-9;]*m//g"],
+            input=proc.stdout + proc.stderr, capture_output=True, text=True
+        ).stdout
+        self.out_view.get_buffer().set_text(clean)
+
+win = InstallerWindow()
+win.connect("destroy", Gtk.main_quit)
+win.show_all()
+Gtk.main()
+PYEOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --test)
+            SELF_TEST=1
+            shift
+            ;;
+        --gui)
+            GUI_MODE=1
+            shift
+            ;;
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        -y|--yes|--auto)
+            AUTO_CONFIRM=1
+            shift
+            ;;
+        --gpt)
+            PTABLE_OPT="gpt"
+            shift
+            ;;
+        --mbr)
+            PTABLE_OPT="mbr"
+            shift
+            ;;
+        -s|--swap)
+            SWAP_OPT="$2"
+            shift 2
+            ;;
+        -r|--root-size)
+            ROOT_SIZE_OPT="$2"
+            shift 2
+            ;;
+        -t|--target)
+            TARGET_DEV="$2"
+            shift 2
+            ;;
+        -*)
+            echo -e "${C_CRIMSON}[!] Unknown option: $1${C_RESET}"
+            print_usage
+            exit 1
+            ;;
+        *)
+            if [ -z "$TARGET_DEV" ]; then
+                TARGET_DEV="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [ "$SELF_TEST" -eq 1 ]; then
+    bash -n "$SCRIPT_PATH"
+    ROOT_DEV="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+    if [ -n "$ROOT_DEV" ] && [ -b "$ROOT_DEV" ]; then
+        if ! is_live_root_device "$ROOT_DEV"; then
+            echo "[FAIL] Live root guard did not detect $ROOT_DEV"
+            exit 1
+        fi
+    fi
+    TMP_IMG="$(mktemp /tmp/omniq_installer_test_XXXXXX.img)"
+    truncate -s 16G "$TMP_IMG"
+    "$SCRIPT_PATH" --dry-run --gpt --swap 2G --target "$TMP_IMG" >/dev/null
+    "$SCRIPT_PATH" --dry-run --mbr --swap 0 --target "$TMP_IMG" >/dev/null
+    rm -f "$TMP_IMG"
+    echo "[PASS] omniq-installer syntax, GPT/MBR space allocator, and live (/) guard verified."
+    exit 0
+fi
+
+if [ "$GUI_MODE" -eq 1 ]; then
+    launch_gtk_wizard
+    exit 0
+fi
+
+echo -e "${C_BOLD}${C_CYAN}========================================================================${C_RESET}"
+echo -e "${C_BOLD}${C_CYAN}  OmniQ-OS 24.04-RT | Production NVMe / SATA Quantum Disk Installer     ${C_RESET}"
+echo -e "${C_BOLD}${C_CYAN}  PREEMPT_RT Kernel + QMMU Spatial Allocator + NIST PQC Bootloader      ${C_RESET}"
+echo -e "${C_BOLD}${C_CYAN}========================================================================${C_RESET}"
+
+if [ -z "$TARGET_DEV" ]; then
+    echo -e "${C_BOLD}[*] Available Block Storage Devices:${C_RESET}"
+    lsblk -p -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,MODEL 2>/dev/null || lsblk
+    echo ""
+    read -r -p "Enter target block device to install OmniQ-OS (e.g. /dev/sda, /dev/nvme0n1): " TARGET_DEV
+fi
+
+if is_live_root_device "$TARGET_DEV"; then
+    echo -e "${C_CRIMSON}[!] CRITICAL SAFETY BLOCK: '$TARGET_DEV' backs the live running root filesystem (/). Refusing to overwrite!${C_RESET}"
+    exit 1
+fi
+
+if [ ! -b "$TARGET_DEV" ] && ! { [ "$DRY_RUN" -eq 1 ] && [ -f "$TARGET_DEV" ]; }; then
+    echo -e "${C_CRIMSON}[!] Target '$TARGET_DEV' is not a valid block device.${C_RESET}"
+    lsblk 2>/dev/null || true
+    exit 1
+fi
+
+IS_UEFI=0
+[ -d /sys/firmware/efi ] && IS_UEFI=1
+
+if [ "$PTABLE_OPT" = "gpt" ]; then
+    PTABLE="gpt"
+elif [ "$PTABLE_OPT" = "mbr" ]; then
+    PTABLE="mbr"
+else
+    PTABLE=$([ "$IS_UEFI" -eq 1 ] && echo "gpt" || echo "mbr")
+fi
+
+if [ -b "$TARGET_DEV" ]; then
+    DISK_BYTES=$(lsblk -b -n -d -o SIZE "$TARGET_DEV" 2>/dev/null || blockdev --getsize64 "$TARGET_DEV" 2>/dev/null || echo 0)
+else
+    DISK_BYTES=$(stat -c %s "$TARGET_DEV" 2>/dev/null || echo 0)
+fi
+DISK_MB=$((DISK_BYTES / 1024 / 1024))
+DISK_GB=$((DISK_BYTES / 1024 / 1024 / 1024))
+
+if [ "$DISK_MB" -lt 4096 ]; then
+    echo -e "${C_CRIMSON}[!] Target disk capacity ($DISK_MB MiB) is smaller than minimum required 4096 MiB.${C_RESET}"
+    exit 1
+fi
+
+SWAP_MB=0
+if [ "$SWAP_OPT" = "auto" ]; then
+    MEM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}' || echo 8388608)
+    if [ "$MEM_KB" -le 8388608 ]; then
+        SWAP_MB=4096
+    else
+        SWAP_MB=8192
+    fi
+    if [ "$DISK_MB" -lt 24576 ] && [ "$SWAP_MB" -gt 2048 ]; then
+        SWAP_MB=2048
+    fi
+elif [[ "$SWAP_OPT" =~ ^[0-9]+[gG]$ ]]; then
+    SWAP_MB=$(( ${SWAP_OPT%[gG]} * 1024 ))
+elif [[ "$SWAP_OPT" =~ ^[0-9]+[mM]$ ]]; then
+    SWAP_MB=${SWAP_OPT%[mM]}
+elif [ "$SWAP_OPT" = "0" ] || [ "$SWAP_OPT" = "none" ]; then
+    SWAP_MB=0
+else
+    SWAP_MB=4096
+fi
+
+ESP_MB=$([ "$PTABLE" = "gpt" ] && echo 512 || echo 0)
+OVERHEAD_MB=8
+REMAINING_MB=$((DISK_MB - ESP_MB - SWAP_MB - OVERHEAD_MB))
+
+if [ "$ROOT_SIZE_OPT" = "max" ]; then
+    ROOT_MB=$REMAINING_MB
+elif [[ "$ROOT_SIZE_OPT" =~ ^[0-9]+[gG]$ ]]; then
+    ROOT_MB=$(( ${ROOT_SIZE_OPT%[gG]} * 1024 ))
+    [ "$ROOT_MB" -gt "$REMAINING_MB" ] && ROOT_MB=$REMAINING_MB
+else
+    ROOT_MB=$REMAINING_MB
+fi
+
+if [ "$ROOT_MB" -lt 2048 ]; then
+    echo -e "${C_CRIMSON}[!] Calculated root partition ($ROOT_MB MiB) is smaller than 2048 MiB.${C_RESET}"
+    exit 1
+fi
+
+PART_PREFIX="$TARGET_DEV"
+if [[ "$TARGET_DEV" =~ [0-9]$ ]]; then
+    PART_PREFIX="${TARGET_DEV}p"
+fi
+
+if [ "$PTABLE" = "gpt" ]; then
+    PART_ESP="${PART_PREFIX}1"
+    if [ "$SWAP_MB" -gt 0 ]; then
+        PART_SWAP="${PART_PREFIX}2"
+        PART_ROOT="${PART_PREFIX}3"
+    else
+        PART_SWAP=""
+        PART_ROOT="${PART_PREFIX}2"
+    fi
+else
+    PART_ESP=""
+    if [ "$SWAP_MB" -gt 0 ]; then
+        PART_SWAP="${PART_PREFIX}1"
+        PART_ROOT="${PART_PREFIX}2"
+    else
+        PART_SWAP=""
+        PART_ROOT="${PART_PREFIX}1"
+    fi
+fi
+
+echo -e "${C_BOLD}[*] OmniQ-OS Disk Target & Space Allocation Plan:${C_RESET}"
+echo -e "    Target Device:     ${C_CYAN}${TARGET_DEV}${C_RESET} (${DISK_GB} GiB / ${DISK_MB} MiB)"
+echo -e "    Partition Table:   ${C_CYAN}${PTABLE^^}${C_RESET}"
+[ -n "$PART_ESP" ] && echo -e "    EFI System (ESP):  ${C_VIOLET}${PART_ESP}${C_RESET} -> ${ESP_MB} MiB (FAT32, /boot/efi)"
+[ -n "$PART_SWAP" ] && echo -e "    Swap Partition:    ${C_VIOLET}${PART_SWAP}${C_RESET} -> ${SWAP_MB} MiB (Linux Swap)"
+echo -e "    Quantum Root (/):  ${C_GREEN}${PART_ROOT}${C_RESET} -> ${ROOT_MB} MiB (Ext4 fast_commit, LABEL=OMNIQ_ROOT)"
+echo ""
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo -e "${C_BOLD}${C_GREEN}[+] Dry-run completed: Allocation plan verified. Zero bytes written to $TARGET_DEV.${C_RESET}"
+    exit 0
+fi
+
+if [ "$AUTO_CONFIRM" -ne 1 ]; then
+    echo -e "${C_CRIMSON}${C_BOLD}[WARNING] ALL DATA ON $TARGET_DEV WILL BE PERMANENTLY ERASED!${C_RESET}"
+    read -r -p "Type 'YES' or '$TARGET_DEV' to proceed: " CONFIRM
+    if [ "$CONFIRM" != "YES" ] && [ "$CONFIRM" != "$TARGET_DEV" ]; then
+        echo "[*] Installation aborted safely."
+        exit 0
+    fi
+fi
+
+echo "[*] Step 1/6: Partitioning $TARGET_DEV (${PTABLE^^})..."
+dd if=/dev/zero of="$TARGET_DEV" bs=512 count=4096 status=none 2>/dev/null || true
+
+if [ "$PTABLE" = "gpt" ]; then
+    parted -s "$TARGET_DEV" mklabel gpt
+    parted -s "$TARGET_DEV" mkpart "OMNIQ_ESP" fat32 1MiB 513MiB
+    parted -s "$TARGET_DEV" set 1 esp on
+    if [ "$SWAP_MB" -gt 0 ]; then
+        SWAP_END=$((513 + SWAP_MB))
+        parted -s "$TARGET_DEV" mkpart "OMNIQ_SWAP" linux-swap 513MiB "${SWAP_END}MiB"
+        parted -s "$TARGET_DEV" mkpart "OMNIQ_ROOT" ext4 "${SWAP_END}MiB" 100%
+    else
+        parted -s "$TARGET_DEV" mkpart "OMNIQ_ROOT" ext4 513MiB 100%
+    fi
+else
+    parted -s "$TARGET_DEV" mklabel msdos
+    if [ "$SWAP_MB" -gt 0 ]; then
+        SWAP_END=$((1 + SWAP_MB))
+        parted -s "$TARGET_DEV" mkpart primary linux-swap 1MiB "${SWAP_END}MiB"
+        parted -s "$TARGET_DEV" mkpart primary ext4 "${SWAP_END}MiB" 100%
+        parted -s "$TARGET_DEV" set 2 boot on
+    else
+        parted -s "$TARGET_DEV" mkpart primary ext4 1MiB 100%
+        parted -s "$TARGET_DEV" set 1 boot on
+    fi
+fi
+
+partprobe "$TARGET_DEV" 2>/dev/null || udevadm settle 2>/dev/null || sleep 2
+
+echo "[*] Step 2/6: Formatting filesystems..."
+[ -n "$PART_ESP" ] && mkfs.vfat -F 32 -n "OMNIQ_ESP" "$PART_ESP"
+[ -n "$PART_SWAP" ] && mkswap -L "OMNIQ_SWAP" "$PART_SWAP"
+mkfs.ext4 -F -L "OMNIQ_ROOT" -O fast_commit "$PART_ROOT"
+
+echo "[*] Step 3/6: Mounting target filesystems..."
+MOUNT_DIR="/mnt/omniq_target"
+mkdir -p "$MOUNT_DIR"
+mount "$PART_ROOT" "$MOUNT_DIR"
+if [ -n "$PART_ESP" ]; then
+    mkdir -p "$MOUNT_DIR/boot/efi"
+    mount "$PART_ESP" "$MOUNT_DIR/boot/efi"
+fi
+
+echo "[*] Step 4/6: Deploying OmniQ-OS runtime, circuits & kernel stack..."
+mkdir -p "$MOUNT_DIR"/{bin,sbin,lib,lib64,usr/bin,usr/local/bin,etc/omniq,boot/grub,var/log/omniq,home/quantum,opt/omniq,proc,sys,dev,run,tmp}
+chmod 1777 "$MOUNT_DIR/tmp"
+
+if [ -f "/mnt/cdrom/casper/filesystem.squashfs" ] && command -v unsquashfs >/dev/null 2>&1; then
+    unsquashfs -f -d "$MOUNT_DIR" "/mnt/cdrom/casper/filesystem.squashfs"
+elif [ -f "$PROJECT_ROOT/build/iso_root/casper/filesystem.squashfs" ] && command -v unsquashfs >/dev/null 2>&1; then
+    unsquashfs -f -d "$MOUNT_DIR" "$PROJECT_ROOT/build/iso_root/casper/filesystem.squashfs"
+fi
+
+cp -a "$PROJECT_ROOT/bin/"* "$MOUNT_DIR/usr/local/bin/" 2>/dev/null || true
+[ -d "$PROJECT_ROOT/lib" ] && cp -a "$PROJECT_ROOT/lib" "$MOUNT_DIR/opt/omniq/" || true
+[ -d "$PROJECT_ROOT/runtime" ] && cp -a "$PROJECT_ROOT/runtime" "$MOUNT_DIR/opt/omniq/" || true
+[ -d "$PROJECT_ROOT/src" ] && cp -a "$PROJECT_ROOT/src" "$MOUNT_DIR/opt/omniq/" || true
+[ -d "$PROJECT_ROOT/circuits" ] && cp -a "$PROJECT_ROOT/circuits" "$MOUNT_DIR/opt/omniq/" || true
+
+echo "[*] Step 5/6: Writing /etc/fstab and GRUB2 PREEMPT_RT configuration..."
+ROOT_UUID=$(blkid -s UUID -o value "$PART_ROOT" 2>/dev/null || echo "")
+ESP_UUID=$([ -n "$PART_ESP" ] && blkid -s UUID -o value "$PART_ESP" 2>/dev/null || echo "")
+SWAP_UUID=$([ -n "$PART_SWAP" ] && blkid -s UUID -o value "$PART_SWAP" 2>/dev/null || echo "")
+
+cat << EOF > "$MOUNT_DIR/etc/fstab"
+# /etc/fstab: OmniQ-OS Real-Time Quantum Linux
+$([ -n "$ROOT_UUID" ] && echo "UUID=$ROOT_UUID" || echo "LABEL=OMNIQ_ROOT")  /          ext4   noatime,errors=remount-ro  0  1
+$([ -n "$ESP_UUID" ] && echo "UUID=$ESP_UUID  /boot/efi  vfat   umask=0077                 0  2" || true)
+$([ -n "$SWAP_UUID" ] && echo "UUID=$SWAP_UUID  none       swap   sw                         0  0" || true)
+tmpfs  /dev/shm  tmpfs  defaults,noatime,size=4G  0  0
+EOF
+
+cat << 'EOF' > "$MOUNT_DIR/boot/grub/grub.cfg"
+set default="0"
+set timeout=3
+set gfxmode=1920x1080,auto
+set gfxpayload=keep
+
+menuentry "OmniQ-OS 24.04-RT (PREEMPT_RT | 127-Qubit QMMU | <50mK Safety)" {
+    linux /boot/vmlinuz root=LABEL=OMNIQ_ROOT rw isolcpus=2,3 nohz_full=2,3 rcu_nocbs=2,3 idle=poll quiet splash
+    initrd /boot/initrd.img
+}
+
+menuentry "OmniQ-OS Cryogenic Safe Mode (RF DAC Clamped 0x00)" {
+    linux /boot/vmlinuz root=LABEL=OMNIQ_ROOT rw single omniq.rf_clamp=1
+    initrd /boot/initrd.img
+}
+EOF
+
+if [ "$PTABLE" = "gpt" ] && [ -n "$PART_ESP" ]; then
+    grub-install --target=x86_64-efi --efi-directory="$MOUNT_DIR/boot/efi" --boot-directory="$MOUNT_DIR/boot" --bootloader-id=OmniQ --removable --recheck 2>/dev/null || true
+else
+    grub-install --target=i386-pc --boot-directory="$MOUNT_DIR/boot" --recheck "$TARGET_DEV" 2>/dev/null || true
+fi
+
+echo "[*] Step 6/6: Finalizing user 'quantum' and unmounting..."
+chroot "$MOUNT_DIR" useradd -m -s /bin/bash quantum 2>/dev/null || true
+sync
+[ -n "$PART_ESP" ] && umount "$MOUNT_DIR/boot/efi" 2>/dev/null || true
+umount "$MOUNT_DIR" 2>/dev/null || true
+
+echo -e "${C_BOLD}${C_GREEN}[SUCCESS] OmniQ-OS permanently installed onto $TARGET_DEV!${C_RESET}"

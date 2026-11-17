@@ -1,8 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-"""
-OmniQ-OS Python SDK
-"""
-
 from .core import (
     QPU,
     QPUTopology,

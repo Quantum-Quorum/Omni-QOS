@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import time
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+CSS_DATA = b"""
+window {
+    background-color: #0D0B18;
+    color: #EDEAF5;
+    font-family: 'DejaVu Sans', sans-serif;
+}
+
+.card {
+    background-color: #141126;
+    border: 1px solid rgba(138, 79, 255, 0.40);
+    border-radius: 12px;
+    padding: 16px;
+}
+
+.snap-title {
+    font-size: 15px;
+    font-weight: bold;
+    color: #00E5FF;
+}
+
+button.action-btn-cyan {
+    background: linear-gradient(135deg, #8A4FFF, #00E5FF);
+    border: 1px solid #00E5FF;
+    border-radius: 8px;
+    color: #FFFFFF;
+    font-weight: bold;
+    padding: 10px 18px;
+    font-size: 13px;
+}
+
+combobox button {
+    background-color: #1A1530;
+    border: 1px solid #8A4FFF;
+    border-radius: 6px;
+    color: #EDEAF5;
+    padding: 4px 10px;
+}
+
+radiobutton {
+    color: #EDEAF5;
+}
+"""
+
+def find_icon(name):
+    for d in [
+        "/usr/share/omniq/icons",
+        "/etc/omniq/icons",
+        os.path.join(REPO_ROOT, "etc/omniq/icons"),
+        "/usr/share/omniq/icons/16x16",
+        "/etc/omniq/icons/16x16",
+        os.path.join(REPO_ROOT, "etc/omniq/icons/16x16"),
+    ]:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+class ScreenshotWindow(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="OmniQ Screen Capture")
+        self.set_wmclass("omniq-screenshot", "Omniq-screenshot")
+        self.set_default_size(520, 340)
+        self.set_position(Gtk.WindowPosition.CENTER)
+
+        icon_path = find_icon("screenshot_16.png") or find_icon("screenshot.png")
+        if icon_path:
+            try:
+                self.set_icon_from_file(icon_path)
+            except Exception:
+                pass
+
+        style_provider = Gtk.CssProvider()
+        style_provider.load_from_data(CSS_DATA)
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            style_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+        settings_gtk = Gtk.Settings.get_default()
+        if settings_gtk:
+            settings_gtk.set_property("gtk-application-prefer-dark-theme", True)
+
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        main_box.set_margin_top(12)
+        main_box.set_margin_bottom(12)
+        main_box.set_margin_start(12)
+        main_box.set_margin_end(12)
+        self.add(main_box)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        card.get_style_context().add_class("card")
+        main_box.pack_start(card, True, True, 0)
+
+        title = Gtk.Label(label="OmniQ Screen Capture Utility")
+        title.set_xalign(0.0)
+        title.get_style_context().add_class("snap-title")
+        card.pack_start(title, False, False, 0)
+
+        mode_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.rb_full = Gtk.RadioButton.new_with_label_from_widget(
+            None, "Capture Entire Screen (Desktop & All Windows)"
+        )
+        self.rb_window = Gtk.RadioButton.new_with_label_from_widget(
+            self.rb_full, "Capture Active Focused Window"
+        )
+        mode_box.pack_start(self.rb_full, False, False, 0)
+        mode_box.pack_start(self.rb_window, False, False, 0)
+        card.pack_start(mode_box, False, False, 4)
+
+        d_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        d_lbl = Gtk.Label(label="Capture Delay:")
+        d_lbl.set_xalign(0.0)
+        d_row.pack_start(d_lbl, False, False, 0)
+
+        self.delay_combo = Gtk.ComboBoxText()
+        self.delay_combo.append_text("Immediate (0 seconds)")
+        self.delay_combo.append_text("3 seconds")
+        self.delay_combo.append_text("5 seconds")
+        self.delay_combo.set_active(0)
+        d_row.pack_start(self.delay_combo, False, False, 0)
+        card.pack_start(d_row, False, False, 4)
+
+        snap_btn = Gtk.Button(label="Take Screenshot")
+        snap_btn.get_style_context().add_class("action-btn-cyan")
+        snap_btn.connect("clicked", self._on_take_screenshot)
+        card.pack_start(snap_btn, False, False, 8)
+
+        self.status_lbl = Gtk.Label(label="Ready to capture.")
+        self.status_lbl.set_xalign(0.0)
+        card.pack_start(self.status_lbl, False, False, 0)
+
+    def _on_take_screenshot(self, _btn):
+        idx = self.delay_combo.get_active()
+        delay_sec = 0 if idx == 0 else (3 if idx == 1 else 5)
+        self.hide()
+        if delay_sec > 0:
+            GLib.timeout_add_seconds(delay_sec, self._do_capture)
+        else:
+            GLib.timeout_add(250, self._do_capture)
+
+    def _do_capture(self):
+        target_win = None
+        if self.rb_window.get_active():
+            screen = Gdk.Screen.get_default()
+            if screen:
+                target_win = screen.get_active_window()
+
+        if not target_win or target_win.get_width() <= 1 or target_win.get_height() <= 1:
+            target_win = Gdk.get_default_root_window()
+
+        if not target_win:
+            self.show_all()
+            self.status_lbl.set_text("Error: no root X11 window available.")
+            return False
+
+        w = max(1, target_win.get_width())
+        h = max(1, target_win.get_height())
+        pixbuf = Gdk.pixbuf_get_from_window(target_win, 0, 0, w, h)
+        if pixbuf:
+            pic_dir = os.path.expanduser("~/Pictures")
+            os.makedirs(pic_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            out_file = os.path.join(pic_dir, f"omniq_screenshot_{ts}.png")
+            pixbuf.savev(out_file, "png", [], [])
+            try:
+                clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+                clipboard.set_image(pixbuf)
+                clipboard.store()
+            except Exception:
+                pass
+            self.show_all()
+            self.status_lbl.set_markup(
+                f"<span foreground='#00FF9D'><b>[OK] Saved: {out_file} (Copied to Clipboard)</b></span>"
+            )
+        else:
+            self.show_all()
+            self.status_lbl.set_text("Error capturing screen.")
+        return False
+
+def do_instant_full_capture():
+    root_win = Gdk.get_default_root_window()
+    if not root_win:
+        return
+    w = max(1, root_win.get_width())
+    h = max(1, root_win.get_height())
+    pixbuf = Gdk.pixbuf_get_from_window(root_win, 0, 0, w, h)
+    if pixbuf:
+        pic_dir = os.path.expanduser("~/Pictures")
+        os.makedirs(pic_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        out_file = os.path.join(pic_dir, f"omniq_screenshot_{ts}.png")
+        pixbuf.savev(out_file, "png", [], [])
+        print(f"[+] Instant capture saved: {out_file}")
+
+def main():
+    GLib.set_prgname("omniq-screenshot")
+    if "--test" in sys.argv:
+        assert find_icon("screenshot_16.png") is not None
+        print("[+] omniq-screenshot headless self-test passed.")
+        return 0
+    if "--full" in sys.argv:
+        do_instant_full_capture()
+        return 0
+
+    GLib.set_application_name("OmniQ Screen Capture")
+    win = ScreenshotWindow()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

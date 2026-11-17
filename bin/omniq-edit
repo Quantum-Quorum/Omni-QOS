@@ -1,0 +1,587 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from typing import Dict, List, Optional, Tuple
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+for _p in reversed([
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    "/opt/omniq/src",
+    "/usr/lib/python3/dist-packages",
+]):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from omniq.circuit import Circuit, Statevector
+from omniqos.core import QPU
+from omniq_core_bridge import core_bridge
+
+IPC_HILBERT_PATH = "/tmp/omniq_hilbert_state.json"
+
+DARK_CSS = b"""
+window, .main-bg {
+    background-color: #0D0B18;
+    color: #ECF2FF;
+    font-family: "DejaVu Sans", sans-serif;
+}
+.toolbar-bar {
+    background: linear-gradient(to right, #110E22, #1A1530);
+    border-bottom: 1px solid rgba(138, 79, 255, 0.38);
+    padding: 6px 10px;
+}
+button {
+    background-image: none;
+    background-color: #1A1530;
+    color: #E2E8F0;
+    border: 1px solid rgba(138, 79, 255, 0.40);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: bold;
+}
+button:hover {
+    background-color: #261E47;
+    border-color: #00E5FF;
+    color: #00E5FF;
+}
+button.run-btn {
+    background: linear-gradient(135deg, #0E4B63, #008CA8);
+    border-color: #00E5FF;
+    color: #FFFFFF;
+}
+button.run-btn:hover {
+    background: #00E5FF;
+    color: #0D0B18;
+}
+button.maker-btn {
+    background: linear-gradient(135deg, #2D1957, #5B28A8);
+    border-color: #8A4FFF;
+    color: #FFFFFF;
+}
+button.maker-btn:hover {
+    background: #8A4FFF;
+    color: #FFFFFF;
+}
+combobox button {
+    background-image: none;
+    background-color: #141126;
+    color: #ECF2FF;
+    border: 1px solid rgba(138, 79, 255, 0.40);
+    border-radius: 6px;
+}
+.gutter-view, .gutter-view text {
+    background-color: #100E20;
+    color: #6B658E;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+}
+.editor-view, .editor-view text {
+    background-color: #0B0A14;
+    color: #ECF2FF;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+}
+.editor-view text:selected {
+    background-color: #8A4FFF;
+    color: #FFFFFF;
+}
+.console-box {
+    background-color: #090812;
+    border-top: 1px solid rgba(0, 229, 255, 0.35);
+    padding: 6px 10px;
+}
+.console-view, .console-view text {
+    background-color: #07060F;
+    color: #00FF9D;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+}
+.title-lbl {
+    color: #00E5FF;
+    font-weight: bold;
+    font-size: 12px;
+}
+.statusbar {
+    background-color: #100D1F;
+    border-top: 1px solid rgba(138, 79, 255, 0.25);
+    color: #94A3B8;
+    font-size: 11px;
+    padding: 4px 10px;
+}
+dialog, filechooserdialog {
+    background-color: #0D0B18;
+    color: #ECF2FF;
+    border: 1px solid #8A4FFF;
+}
+"""
+
+RE_QASM_KW = re.compile(
+    r"\b(OPENQASM|include|qubit|bit|qreg|creg|measure|barrier|reset|def|class|import|from|return|for|if|else|with|as|in|print)\b"
+)
+RE_QASM_GATES = re.compile(
+    r"\b(h|x|y|z|s|sdg|t|tdg|sx|rx|ry|rz|p|phase|cx|cnot|cy|cz|swap|iswap|cp|crz|ccx|cswap)\b"
+)
+RE_COMMENTS = re.compile(r"(//.*|#.*)")
+RE_STRINGS = re.compile(r'("[^"]*"|\'[^\']*\')')
+RE_NUMBERS = re.compile(r"\b(pi|\d+(?:\.\d+)?)\b")
+
+def get_templates() -> List[Tuple[str, str, str]]:
+    items: List[Tuple[str, str, str]] = []
+    cdir = os.path.join(REPO_ROOT, "circuits")
+    if os.path.isdir(cdir):
+        for fn in sorted(os.listdir(cdir)):
+            if fn.endswith(".qasm"):
+                fp = os.path.join(cdir, fn)
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        items.append((fn, f"QASM: {fn}", f.read()))
+                except Exception:
+                    pass
+    py_tpl = (
+        "#!/usr/bin/env python3\n"
+        '"""OmniQ-OS Python Quantum SDK + QPU Partition Demo"""\n'
+        "from omniq.circuit import Circuit\n"
+        "from omniqos.core import QPU\n\n"
+        "c = Circuit(3).h(0).cx(0, 1).cx(1, 2)\n"
+        "sv = c.execute()\n"
+        'print(f"GHZ Entanglement Entropy: {sv.entanglement_entropy():.4f} bits")\n\n'
+        "with QPU() as qpu:\n"
+        "    with qpu.allocate_partition(num_qubits=3, guard_hops=1) as part:\n"
+        '        job = part.submit(c.to_qasm("3.0"), shots=1024)\n'
+        '        print(f"Partition #{part.partition_id} Counts: {job.counts} ({job.execution_time_ns} ns)")\n'
+    )
+    items.append(("python_sdk_demo.py", "Python: OmniQ SDK + QPU Demo", py_tpl))
+    if not items:
+        items.append((
+            "bell_pair.qasm",
+            "QASM: bell_pair.qasm",
+            'OPENQASM 3.0;\ninclude "stdgates.inc";\nqubit[2] q;\nbit[2] c;\nh q[0];\ncx q[0], q[1];\n',
+        ))
+    return items
+
+def format_line_numbers(text: str) -> str:
+    n_lines = max(1, text.count("\n") + 1)
+    return "\n".join(f"{i:>4d}" for i in range(1, n_lines + 1))
+
+def execute_code_on_qpu(code: str, filename: Optional[str] = None, shots: int = 1024) -> str:
+    stripped = code.lstrip()
+    is_python = (filename and filename.endswith(".py")) or stripped.startswith(("#!", "import ", "from ", "def "))
+    if is_python and "OPENQASM" not in code[:120]:
+        env = os.environ.copy()
+        py_paths = [
+            os.path.join(REPO_ROOT, "runtime", "python"),
+            os.path.join(REPO_ROOT, "src"),
+            env.get("PYTHONPATH", ""),
+        ]
+        env["PYTHONPATH"] = ":".join(p for p in py_paths if p)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", prefix="omniq_edit_", delete=False) as tf:
+            tf.write(code)
+            tpath = tf.name
+        try:
+            t0 = time.perf_counter()
+            proc = subprocess.run([sys.executable, tpath], capture_output=True, text=True, timeout=15, env=env)
+            dt_ms = (time.perf_counter() - t0) * 1000.0
+            out = (proc.stdout + ("\n" + proc.stderr if proc.stderr else "")).strip()
+            return f"[Python Quantum Runtime | Exit={proc.returncode} | {dt_ms:.1f} ms]\n{out}\n"
+        finally:
+            if os.path.exists(tpath):
+                os.unlink(tpath)
+
+    t0 = time.perf_counter()
+    circ = Circuit.from_qasm(code)
+    sv = circ.execute()
+    assert isinstance(sv, Statevector)
+    cpp_res = core_bridge.simulate_qasm(code, shots=shots)
+    counts = cpp_res["counts"] if (cpp_res and "counts" in cpp_res) else sv.sample_counts(shots=shots, seed=42)
+
+    with QPU() as qpu:
+        top = qpu.get_topology()
+        with qpu.allocate_partition(num_qubits=max(1, circ.num_qubits), guard_hops=1) as part:
+            job = part.submit(code, shots=shots)
+
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+
+    try:
+        if sv.num_qubits <= 6:
+            with open(IPC_HILBERT_PATH, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "source": filename or "omniq-edit",
+                        "num_qubits": sv.num_qubits,
+                        "qasm": code,
+                        "amplitudes_re": [float(x.real) for x in sv.data],
+                        "amplitudes_im": [float(x.imag) for x in sv.data],
+                    },
+                    f,
+                )
+    except Exception:
+        pass
+
+    bloch_lines = []
+    for q in range(min(circ.num_qubits, 4)):
+        bx, by, bz, pur = sv.bloch_vector(q)
+        bloch_lines.append(f"  q[{q}] Bloch=({bx:+.3f}, {by:+.3f}, {bz:+.3f})  Purity={pur:.4f}")
+
+    sorted_counts = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:8]
+    counts_str = ", ".join(f"|{k}>: {v}" for k, v in sorted_counts)
+
+    report = [
+        f"[OmniQ Quantum Execution Complete in {dt_ms:.2f} ms]",
+        f"  Target QPU       : {top.device_name} (MXC={top.mixing_chamber_temp_mK:.3f} mK)",
+        f"  QMMU Partition   : #{part.partition_id} | Physical Qubits={part.qubits} | Guard Band={part.guard_qubits}",
+        f"  Circuit Metrics  : {circ.num_qubits} Qubits | {len(circ.gates)} Gates | QPU Time={job.execution_time_ns} ns",
+        f"  Entanglement S_A : {sv.entanglement_entropy():.4f} bits",
+        f"  Hilbert Counts   : {counts_str}",
+        "  Reduced Bloch Vectors:",
+        *bloch_lines,
+    ]
+    return "\n".join(report) + "\n"
+
+def resolve_sibling_bin(name: str) -> str:
+    local = os.path.join(REPO_ROOT, "bin", name)
+    if os.path.isfile(local):
+        return local
+    for p in [f"/usr/local/bin/{name}", f"/usr/bin/{name}"]:
+        if os.path.isfile(p):
+            return p
+    return shutil.which(name) or local
+
+def launch_gui(initial_file: Optional[str] = None) -> None:
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, GLib, Gtk
+
+    GLib.set_prgname("omniq-edit")
+    GLib.set_application_name("OmniQ Quantum Code Editor")
+
+    gtk_settings = Gtk.Settings.get_default()
+    if gtk_settings is not None:
+        gtk_settings.set_property("gtk-application-prefer-dark-theme", True)
+
+    provider = Gtk.CssProvider()
+    provider.load_from_data(DARK_CSS)
+    screen = Gdk.Screen.get_default()
+    if screen is not None:
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+    class OmniQEditorWindow(Gtk.Window):
+        def __init__(self, start_file: Optional[str] = None):
+            super().__init__(title="OmniQ Edit - OpenQASM 3.0 & Python Quantum Code Studio")
+            self.set_default_size(1060, 700)
+            self.set_position(Gtk.WindowPosition.CENTER)
+
+            self.filepath: Optional[str] = None
+            self.templates: Dict[str, str] = {}
+
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            vbox.get_style_context().add_class("main-bg")
+            self.add(vbox)
+
+            tb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            tb.get_style_context().add_class("toolbar-bar")
+
+            btn_new = Gtk.Button(label="New")
+            btn_new.connect("clicked", self._on_new)
+            tb.pack_start(btn_new, False, False, 0)
+
+            btn_open = Gtk.Button(label="Open")
+            btn_open.connect("clicked", self._on_open)
+            tb.pack_start(btn_open, False, False, 0)
+
+            btn_save = Gtk.Button(label="Save")
+            btn_save.connect("clicked", self._on_save)
+            tb.pack_start(btn_save, False, False, 0)
+
+            btn_save_as = Gtk.Button(label="Save As")
+            btn_save_as.connect("clicked", lambda _b: self._save_dialog())
+            tb.pack_start(btn_save_as, False, False, 0)
+
+            lbl_tpl = Gtk.Label(label="Template:")
+            lbl_tpl.set_margin_start(6)
+            tb.pack_start(lbl_tpl, False, False, 0)
+
+            self.tpl_combo = Gtk.ComboBoxText()
+            for tid, tlabel, tcode in get_templates():
+                self.templates[tid] = tcode
+                self.tpl_combo.append(tid, tlabel)
+            self.tpl_combo.connect("changed", self._on_template_selected)
+            tb.pack_start(self.tpl_combo, False, False, 0)
+
+            tb.pack_start(Gtk.Box(), True, True, 0)
+
+            btn_run = Gtk.Button(label="Simulate & Run on QPU")
+            btn_run.get_style_context().add_class("run-btn")
+            btn_run.connect("clicked", self._on_run_qpu)
+            tb.pack_start(btn_run, False, False, 0)
+
+            btn_cm = Gtk.Button(label="Open in Circuit Maker")
+            btn_cm.get_style_context().add_class("maker-btn")
+            btn_cm.connect("clicked", self._on_open_circuit_maker)
+            tb.pack_start(btn_cm, False, False, 0)
+
+            btn_dbg = Gtk.Button(label="Step Debug")
+            btn_dbg.connect("clicked", self._on_open_debugger)
+            tb.pack_start(btn_dbg, False, False, 0)
+
+            vbox.pack_start(tb, False, False, 0)
+
+            vpaned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+            vpaned.set_wide_handle(True)
+            vpaned.set_position(450)
+            vbox.pack_start(vpaned, True, True, 0)
+
+            editor_scroll = Gtk.ScrolledWindow()
+            editor_scroll.set_hexpand(True)
+            editor_scroll.set_vexpand(True)
+
+            ed_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+
+            self.gutter_view = Gtk.TextView()
+            self.gutter_view.set_editable(False)
+            self.gutter_view.set_cursor_visible(False)
+            self.gutter_view.set_monospace(True)
+            self.gutter_view.set_left_margin(6)
+            self.gutter_view.set_right_margin(8)
+            self.gutter_view.set_top_margin(8)
+            self.gutter_view.get_style_context().add_class("gutter-view")
+            ed_hbox.pack_start(self.gutter_view, False, False, 0)
+
+            self.editor_view = Gtk.TextView()
+            self.editor_view.set_monospace(True)
+            self.editor_view.set_left_margin(10)
+            self.editor_view.set_right_margin(10)
+            self.editor_view.set_top_margin(8)
+            self.editor_view.get_style_context().add_class("editor-view")
+            self.buf = self.editor_view.get_buffer()
+
+            self.tag_kw = self.buf.create_tag("kw", foreground="#C084FC", weight=700)
+            self.tag_gate = self.buf.create_tag("gate", foreground="#00E5FF", weight=700)
+            self.tag_str = self.buf.create_tag("str", foreground="#00FF9D")
+            self.tag_num = self.buf.create_tag("num", foreground="#FBBF24")
+            self.tag_cmt = self.buf.create_tag("cmt", foreground="#64748B")
+
+            self.buf.connect("changed", self._on_buffer_changed)
+            ed_hbox.pack_start(self.editor_view, True, True, 0)
+            editor_scroll.add(ed_hbox)
+            vpaned.pack1(editor_scroll, True, False)
+
+            console_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            console_wrap.get_style_context().add_class("console-box")
+
+            chdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            clbl = Gtk.Label(label="QUANTUM SIMULATOR & QPU EXECUTION CONSOLE")
+            clbl.get_style_context().add_class("title-lbl")
+            clbl.set_xalign(0.0)
+            chdr.pack_start(clbl, True, True, 0)
+
+            btn_clr = Gtk.Button(label="Clear Console")
+            btn_clr.connect("clicked", lambda _b: self.console_buf.set_text(""))
+            chdr.pack_end(btn_clr, False, False, 0)
+            console_wrap.pack_start(chdr, False, False, 0)
+
+            cscroll = Gtk.ScrolledWindow()
+            cscroll.set_hexpand(True)
+            cscroll.set_vexpand(True)
+            self.console_view = Gtk.TextView()
+            self.console_view.set_editable(False)
+            self.console_view.set_monospace(True)
+            self.console_view.get_style_context().add_class("console-view")
+            self.console_buf = self.console_view.get_buffer()
+            self.console_buf.set_text("Ready. Click 'Simulate & Run on QPU' to execute circuit.\n")
+            cscroll.add(self.console_view)
+            console_wrap.pack_start(cscroll, True, True, 0)
+            vpaned.pack2(console_wrap, False, False)
+
+            self.status_lbl = Gtk.Label(label="OpenQASM 3.0 / Python Ready")
+            self.status_lbl.get_style_context().add_class("statusbar")
+            self.status_lbl.set_xalign(0.0)
+            vbox.pack_start(self.status_lbl, False, False, 0)
+
+            if start_file and os.path.isfile(start_file):
+                self._load_file(start_file)
+            else:
+                first_id = get_templates()[0][0]
+                self.tpl_combo.set_active_id(first_id)
+
+        def _get_text(self) -> str:
+            start, end = self.buf.get_bounds()
+            return self.buf.get_text(start, end, True)
+
+        def _on_buffer_changed(self, _buf) -> None:
+            txt = self._get_text()
+            self.gutter_view.get_buffer().set_text(format_line_numbers(txt))
+            self._apply_highlighting(txt)
+            lines = txt.count("\n") + 1
+            fname = self.filepath or "untitled.qasm"
+            self.status_lbl.set_text(f"{fname}  |  {lines} lines  |  {len(txt)} bytes")
+
+        def _apply_highlighting(self, txt: str) -> None:
+            start, end = self.buf.get_bounds()
+            self.buf.remove_all_tags(start, end)
+            for regex, tag in [
+                (RE_QASM_KW, self.tag_kw),
+                (RE_QASM_GATES, self.tag_gate),
+                (RE_NUMBERS, self.tag_num),
+                (RE_STRINGS, self.tag_str),
+                (RE_COMMENTS, self.tag_cmt),
+            ]:
+                for m in regex.finditer(txt):
+                    s_it = self.buf.get_iter_at_offset(m.start())
+                    e_it = self.buf.get_iter_at_offset(m.end())
+                    self.buf.apply_tag(tag, s_it, e_it)
+
+        def _load_file(self, path: str) -> None:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            self.filepath = os.path.abspath(path)
+            self.buf.set_text(content)
+            self.set_title(f"OmniQ Edit - {os.path.basename(path)}")
+
+        def _on_new(self, _btn) -> None:
+            self.filepath = None
+            self.buf.set_text(
+                "// New OpenQASM 3.0 Quantum Program\n"
+                "OPENQASM 3.0;\n"
+                'include "stdgates.inc";\n\n'
+                "qubit[2] q;\n"
+                "bit[2] c;\n\n"
+                "h q[0];\n"
+                "cx q[0], q[1];\n"
+                "c[0] = measure q[0];\n"
+                "c[1] = measure q[1];\n"
+            )
+            self.set_title("OmniQ Edit - untitled.qasm")
+
+        def _on_open(self, _btn) -> None:
+            dlg = Gtk.FileChooserDialog(
+                title="Open OpenQASM or Python Quantum File",
+                parent=self,
+                action=Gtk.FileChooserAction.OPEN,
+            )
+            dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Open", Gtk.ResponseType.OK)
+            cdir = os.path.join(REPO_ROOT, "circuits")
+            if os.path.isdir(cdir):
+                dlg.set_current_folder(cdir)
+            if dlg.run() == Gtk.ResponseType.OK:
+                fn = dlg.get_filename()
+                if fn:
+                    self._load_file(fn)
+            dlg.destroy()
+
+        def _on_save(self, _btn) -> None:
+            if self.filepath:
+                with open(self.filepath, "w", encoding="utf-8") as f:
+                    f.write(self._get_text())
+                self.status_lbl.set_text(f"Saved: {self.filepath}")
+            else:
+                self._save_dialog()
+
+        def _save_dialog(self) -> Optional[str]:
+            dlg = Gtk.FileChooserDialog(
+                title="Save Quantum Program",
+                parent=self,
+                action=Gtk.FileChooserAction.SAVE,
+            )
+            dlg.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
+            dlg.set_current_name(os.path.basename(self.filepath) if self.filepath else "circuit.qasm")
+            saved_path = None
+            if dlg.run() == Gtk.ResponseType.OK:
+                fn = dlg.get_filename()
+                if fn:
+                    self.filepath = fn
+                    with open(fn, "w", encoding="utf-8") as f:
+                        f.write(self._get_text())
+                    saved_path = fn
+                    self.status_lbl.set_text(f"Saved: {fn}")
+            dlg.destroy()
+            return saved_path
+
+        def _on_template_selected(self, combo) -> None:
+            tid = combo.get_active_id()
+            if tid and tid in self.templates:
+                self.filepath = None
+                self.buf.set_text(self.templates[tid])
+                self.set_title(f"OmniQ Edit - {tid}")
+
+        def _on_run_qpu(self, _btn) -> None:
+            code = self._get_text()
+            try:
+                out = execute_code_on_qpu(code, filename=self.filepath)
+            except Exception as exc:
+                out = f"[Execution Error] {exc}\n"
+            self.console_buf.set_text(out)
+
+        def _export_temp_qasm(self) -> str:
+            if self.filepath and self.filepath.endswith(".qasm"):
+                with open(self.filepath, "w", encoding="utf-8") as f:
+                    f.write(self._get_text())
+                return self.filepath
+            fd, tmp_p = tempfile.mkstemp(suffix=".qasm", prefix="omniq_edit_export_")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(self._get_text())
+            return tmp_p
+
+        def _on_open_circuit_maker(self, _btn) -> None:
+            qpath = self._export_temp_qasm()
+            try:
+                execute_code_on_qpu(self._get_text(), filename=qpath, shots=256)
+            except Exception:
+                pass
+            cm = resolve_sibling_bin("omniq-circuit-maker")
+            args = [sys.executable, cm, qpath] if os.path.isfile(cm) else [cm, qpath]
+            subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def _on_open_debugger(self, _btn) -> None:
+            qpath = self._export_temp_qasm()
+            dbg = resolve_sibling_bin("omniq-debugger")
+            args = [sys.executable, dbg, qpath] if os.path.isfile(dbg) else [dbg, qpath]
+            subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    win = OmniQEditorWindow(initial_file)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+def run_self_test() -> int:
+    tpls = get_templates()
+    assert len(tpls) >= 2
+    ln = format_line_numbers("a\nb\nc")
+    assert "3" in ln
+
+    qasm = 'OPENQASM 3.0;\ninclude "stdgates.inc";\nqubit[2] q;\nh q[0];\ncx q[0], q[1];\n'
+    out_qasm = execute_code_on_qpu(qasm, filename="bell.qasm", shots=512)
+    assert "QMMU Partition" in out_qasm
+    assert "1.0000 bits" in out_qasm
+
+    py_code = "from omniq.circuit import Circuit\nprint('PY_OK', Circuit(2).h(0).cx(0,1).execute().num_qubits)\n"
+    out_py = execute_code_on_qpu(py_code, filename="demo.py")
+    assert "PY_OK 2" in out_py
+
+    print("[PASS] omniq-edit QASM/Python templates, gutter, and QPU simulation console verified.")
+    return 0
+
+def main() -> None:
+    if "--test" in sys.argv:
+        sys.exit(run_self_test())
+    init_file = None
+    for a in sys.argv[1:]:
+        if not a.startswith("-"):
+            init_file = a
+            break
+    launch_gui(init_file)
+
+if __name__ == "__main__":
+    main()

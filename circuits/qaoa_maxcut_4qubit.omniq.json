@@ -1,0 +1,167 @@
+{
+  "num_qubits": 4,
+  "gates": [
+    {
+      "type": "H",
+      "qubit": 0,
+      "step": 0
+    },
+    {
+      "type": "H",
+      "qubit": 1,
+      "step": 1
+    },
+    {
+      "type": "H",
+      "qubit": 2,
+      "step": 2
+    },
+    {
+      "type": "H",
+      "qubit": 3,
+      "step": 3
+    },
+    {
+      "type": "CNOT",
+      "qubit": 0,
+      "step": 4,
+      "target": 1
+    },
+    {
+      "type": "RZ",
+      "qubit": 1,
+      "step": 5,
+      "parameter": 2.4749999999999996
+    },
+    {
+      "type": "CNOT",
+      "qubit": 0,
+      "step": 6,
+      "target": 1
+    },
+    {
+      "type": "CNOT",
+      "qubit": 1,
+      "step": 7,
+      "target": 2
+    },
+    {
+      "type": "RZ",
+      "qubit": 2,
+      "step": 8,
+      "parameter": 2.4749999999999996
+    },
+    {
+      "type": "CNOT",
+      "qubit": 1,
+      "step": 9,
+      "target": 2
+    },
+    {
+      "type": "CNOT",
+      "qubit": 2,
+      "step": 10,
+      "target": 3
+    },
+    {
+      "type": "RZ",
+      "qubit": 3,
+      "step": 11,
+      "parameter": 2.4749999999999996
+    },
+    {
+      "type": "CNOT",
+      "qubit": 2,
+      "step": 12,
+      "target": 3
+    },
+    {
+      "type": "CNOT",
+      "qubit": 3,
+      "step": 13,
+      "target": 0
+    },
+    {
+      "type": "RZ",
+      "qubit": 0,
+      "step": 14,
+      "parameter": 2.4749999999999996
+    },
+    {
+      "type": "CNOT",
+      "qubit": 3,
+      "step": 15,
+      "target": 0
+    },
+    {
+      "type": "RX",
+      "qubit": 0,
+      "step": 16,
+      "parameter": 0.8499999999999999
+    },
+    {
+      "type": "RX",
+      "qubit": 1,
+      "step": 17,
+      "parameter": 0.8499999999999999
+    },
+    {
+      "type": "RX",
+      "qubit": 2,
+      "step": 18,
+      "parameter": 0.8499999999999999
+    },
+    {
+      "type": "RX",
+      "qubit": 3,
+      "step": 19,
+      "parameter": 0.8499999999999999
+    }
+  ],
+  "name": "QAOA 4-Qubit Ring MaxCut (p=1)",
+  "source": "circuits/qaoa_maxcut_4qubit.omniq.json",
+  "description": "Converged QAOA p=1 circuit (gamma=1.237, beta=0.425) -> MaxCut=4",
+  "qasm": "OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[4] q;\nbit[4] c;\nh q[0];\nh q[1];\nh q[2];\nh q[3];\ncx q[0], q[1];\nrz(2.475) q[1];\ncx q[0], q[1];\ncx q[1], q[2];\nrz(2.475) q[2];\ncx q[1], q[2];\ncx q[2], q[3];\nrz(2.475) q[3];\ncx q[2], q[3];\ncx q[3], q[0];\nrz(2.475) q[0];\ncx q[3], q[0];\nrx(0.85) q[0];\nrx(0.85) q[1];\nrx(0.85) q[2];\nrx(0.85) q[3];\n",
+  "amplitudes_re": [
+    -0.11547383,
+    -0.03221112,
+    -0.03221112,
+    0.07568081,
+    -0.03221112,
+    -0.11547383,
+    0.07568081,
+    -0.03221112,
+    -0.03221112,
+    0.07568081,
+    -0.11547383,
+    -0.03221112,
+    0.07568081,
+    -0.03221112,
+    -0.03221112,
+    -0.11547383
+  ],
+  "amplitudes_im": [
+    -0.00494044,
+    -0.15313554,
+    -0.15313554,
+    -0.2479162,
+    -0.15313554,
+    -0.49089197,
+    -0.2479162,
+    -0.15313554,
+    -0.15313554,
+    -0.2479162,
+    -0.49089197,
+    -0.15313554,
+    -0.2479162,
+    -0.15313554,
+    -0.15313554,
+    -0.00494044
+  ],
+  "entanglement_entropy_bits": 0.981805,
+  "optimal_gamma_beta": [
+    1.2374999999999998,
+    0.42499999999999993
+  ],
+  "expected_cut": 2.9638
+}

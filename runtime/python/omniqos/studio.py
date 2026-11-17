@@ -1,9 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-"""
-OmniQ-OS: Quantum Assembly Studio & Interactive Environment
-Supports raw OpenQASM 3, pulse bytecode, multi-framework bridges, and GUI debugger launch.
-"""
-
 import os
 import sys
 import argparse
@@ -11,7 +5,6 @@ from typing import Dict
 from .core import QPU
 from .debugger_bridge import OmniQDebuggerBridge
 
-# ANSI Visual Styling matching Option A Brand
 CLR_CYAN = "\033[38;2;0;229;255m"
 CLR_GREEN = "\033[38;2;52;211;153m"
 CLR_YELLOW = "\033[38;2;251;191;36m"
@@ -65,7 +58,6 @@ def print_histogram(counts: Dict[str, int], total_shots: int):
 def run_circuit_on_qpu(qasm: str, shots: int = 1000, launch_gui: bool = False):
     print(f"{CLR_CYAN}[OmniQ-Studio]{CLR_RESET} Allocating spatial partition on QPU...")
     with QPU() as qpu:
-        # Detect qubit count
         num_q = 2
         for line in qasm.splitlines():
             if "qubit[" in line:

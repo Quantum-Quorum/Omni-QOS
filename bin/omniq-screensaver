@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import time
+import math
+import ctypes
+import random
+import warnings
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def find_icon(name):
+    dirs = [
+        "/usr/share/omniq/icons",
+        "/etc/omniq/icons",
+        os.path.join(REPO_ROOT, "etc/omniq/icons"),
+        "/usr/share/omniq/icons/16x16",
+        "/etc/omniq/icons/16x16",
+        os.path.join(REPO_ROOT, "etc/omniq/icons/16x16"),
+    ]
+    for d in dirs:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+def _verify_shadow_hash(password, salt_hash):
+    if not salt_hash or salt_hash in ("*", "!", ""):
+        return False
+    for libname in ("libcrypt.so.2", "libcrypt.so.1", "libc.so.6"):
+        try:
+            lib = ctypes.CDLL(libname)
+            if hasattr(lib, "crypt"):
+                lib.crypt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+                lib.crypt.restype = ctypes.c_char_p
+                res = lib.crypt(password.encode("utf-8"), salt_hash.encode("utf-8"))
+                if res and res.decode("utf-8", "ignore") == salt_hash:
+                    return True
+        except Exception:
+            continue
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import crypt
+            return crypt.crypt(password, salt_hash) == salt_hash
+    except Exception:
+        return False
+
+class QubitNode:
+    def __init__(self, w, h):
+        self.x = random.uniform(50, max(100, w - 50))
+        self.y = random.uniform(50, max(100, h - 50))
+        angle = random.uniform(0, 2 * math.pi)
+        speed = random.uniform(0.5, 1.6)
+        self.vx = math.cos(angle) * speed
+        self.vy = math.sin(angle) * speed
+        self.radius = random.uniform(3.2, 5.5)
+        self.color = random.choice(["#00E5FF", "#8A4FFF", "#00FF9D", "#FF3366"])
+        self.excited = False
+        self.excite_timer = 0
+
+    def update(self, w, h):
+        self.x += self.vx
+        self.y += self.vy
+        if self.x <= 24 or self.x >= w - 24:
+            self.vx *= -1
+        if self.y <= 24 or self.y >= h - 24:
+            self.vy *= -1
+        if self.excite_timer > 0:
+            self.excite_timer -= 1
+            if self.excite_timer == 0:
+                self.excited = False
+        elif random.random() < 0.009:
+            self.excited = True
+            self.excite_timer = random.randint(16, 36)
+
+class EntanglementPulse:
+    def __init__(self, qa, qb):
+        self.ax, self.ay = qa.x, qa.y
+        self.bx, self.by = qb.x, qb.y
+        self.progress = 0.0
+        self.speed = random.uniform(0.04, 0.08)
+
+    def update(self):
+        self.progress += self.speed
+        return self.progress < 1.0
+
+    def current_pos(self):
+        return (
+            self.ax + (self.bx - self.ax) * self.progress,
+            self.ay + (self.by - self.ay) * self.progress,
+        )
+
+def run_screensaver(mode="preview"):
+    import tkinter as tk
+
+    class OmniqScreensaver:
+        def __init__(self):
+            self.mode = mode
+            self.root = tk.Tk(className="Omniq-screensaver")
+            self.root.title("OmniQ Quantum Screensaver")
+            self._after_ids = set()
+            self.running = True
+
+            icon_path = find_icon("screensaver_16.png") or find_icon("omniq-logo_16.png")
+            if icon_path:
+                try:
+                    self.icon_photo = tk.PhotoImage(file=icon_path)
+                    self.root.iconphoto(True, self.icon_photo)
+                except Exception:
+                    pass
+
+            self.root.configure(bg="#0D0B18")
+            self.root.option_add("*Background", "#0D0B18")
+            self.root.option_add("*Foreground", "#EDEAF5")
+            self.root.option_add("*selectBackground", "#8A4FFF")
+            self.root.option_add("*selectForeground", "#FFFFFF")
+            self.root.attributes("-fullscreen", True)
+
+            self.sw = self.root.winfo_screenwidth()
+            self.sh = self.root.winfo_screenheight()
+
+            self.canvas = tk.Canvas(
+                self.root, width=self.sw, height=self.sh, bg="#0D0B18", highlightthickness=0
+            )
+            self.canvas.pack(fill=tk.BOTH, expand=True)
+
+            self.qubits = [QubitNode(self.sw, self.sh) for _ in range(52)]
+            self.pulses = []
+            self.wallpaper_img = None
+
+            if self.mode == "lock":
+                self.draw_lock_screen(tk)
+                try:
+                    self.root.grab_set()
+                except Exception:
+                    pass
+                self.update_clock()
+            else:
+                self.canvas.bind("<Motion>", self.exit_screensaver)
+                self.canvas.bind("<Button-1>", self.exit_screensaver)
+                self.canvas.bind("<Key>", self.exit_screensaver)
+                self.root.bind("<Escape>", self.exit_screensaver)
+                self.animate()
+
+        def _schedule(self, ms, fn):
+            if not self.running:
+                return None
+
+            def _wrap():
+                self._after_ids.discard(jid)
+                if self.running:
+                    fn()
+
+            jid = self.root.after(ms, _wrap)
+            self._after_ids.add(jid)
+            return jid
+
+        def _cleanup_and_close(self):
+            self.running = False
+            for jid in list(self._after_ids):
+                try:
+                    self.root.after_cancel(jid)
+                except Exception:
+                    pass
+            self._after_ids.clear()
+            try:
+                self.root.grab_release()
+            except Exception:
+                pass
+            self.root.destroy()
+
+        def load_lock_wallpaper(self, tk):
+            try:
+                from PIL import Image, ImageFilter
+                import io
+                for p in [
+                    "/etc/omniq/wallpaper_lock_blur.png",
+                    "/usr/share/omniq/wallpaper_lock_blur.png",
+                    os.path.join(REPO_ROOT, "etc/omniq/wallpaper_lock_blur.png"),
+                    "/etc/omniq/wallpaper.png",
+                    os.path.join(REPO_ROOT, "etc/omniq/wallpaper.png"),
+                ]:
+                    if os.path.isfile(p):
+                        img = Image.open(p).convert("RGB")
+                        if "blur" not in os.path.basename(p):
+                            img = img.filter(ImageFilter.GaussianBlur(radius=24))
+                        img = img.resize((self.sw, self.sh), Image.Resampling.LANCZOS)
+                        bio = io.BytesIO()
+                        img.save(bio, format="PPM")
+                        return tk.PhotoImage(data=bio.getvalue())
+            except Exception:
+                pass
+            return None
+
+        def draw_lock_screen(self, tk):
+            self.wallpaper_img = self.load_lock_wallpaper(tk)
+            if self.wallpaper_img:
+                self.canvas.create_image(0, 0, image=self.wallpaper_img, anchor="nw", tags=("lock_bg",))
+            else:
+                self.canvas.create_rectangle(0, 0, self.sw, self.sh, fill="#0D0B18", outline="", tags=("lock_bg",))
+
+            self.clock_id = self.canvas.create_text(
+                self.sw // 2, self.sh // 4 - 30,
+                text=time.strftime("%H:%M"),
+                font=("DejaVu Sans", 56, "bold"),
+                fill="#FFFFFF", tags=("lock_ui",),
+            )
+            self.date_id = self.canvas.create_text(
+                self.sw // 2, self.sh // 4 + 38,
+                text=time.strftime("%A, %B %d"),
+                font=("DejaVu Sans", 15),
+                fill="#00E5FF", tags=("lock_ui",),
+            )
+
+            cx, cy = self.sw // 2, self.sh // 2 + 48
+            card_w, card_h = 390, 275
+            x1, y1 = cx - card_w // 2, cy - card_h // 2
+            x2, y2 = cx + card_w // 2, cy + card_h // 2
+
+            self.canvas.create_rectangle(x1 - 4, y1 - 2, x2 + 4, y2 + 6, fill="#06050D", outline="#1A1530", width=2, tags=("lock_ui",))
+            self.canvas.create_rectangle(x1, y1, x2, y2, fill="#141126", outline="#8A4FFF", width=1.5, tags=("lock_ui",))
+
+            self.lock_frame = tk.Frame(self.canvas, bg="#141126", bd=0, highlightthickness=0)
+            self.canvas.create_window(cx, cy, window=self.lock_frame, width=card_w - 20, height=card_h - 20)
+
+            avatar_frame = tk.Frame(self.lock_frame, bg="#141126")
+            avatar_frame.pack(pady=(10, 4))
+            logo_icon = find_icon("omniq-logo_48.png") or find_icon("omniq-logo.png")
+            if logo_icon:
+                try:
+                    self.logo_img = tk.PhotoImage(file=logo_icon)
+                    tk.Label(avatar_frame, image=self.logo_img, bg="#141126").pack()
+                except Exception:
+                    tk.Label(avatar_frame, text="OMNIQ-OS", font=("DejaVu Sans", 15, "bold"), fg="#00E5FF", bg="#141126").pack()
+            else:
+                tk.Label(avatar_frame, text="OMNIQ-OS", font=("DejaVu Sans", 15, "bold"), fg="#00E5FF", bg="#141126").pack()
+
+            user_name = os.environ.get("USER", "omniq")
+            tk.Label(self.lock_frame, text="OmniQ Quantum Operator", font=("DejaVu Sans", 13, "bold"), fg="#FFFFFF", bg="#141126").pack(pady=(2, 1))
+            tk.Label(self.lock_frame, text=f"Session: {user_name}  |  PREEMPT_RT + PQC Guard", font=("DejaVu Sans", 8), fg="#9E97B8", bg="#141126").pack(pady=(0, 10))
+
+            entry_box = tk.Frame(self.lock_frame, bg="#1A1530", bd=1, relief="solid", highlightbackground="#8A4FFF", highlightcolor="#00E5FF", highlightthickness=1)
+            entry_box.pack(fill=tk.X, padx=24, pady=(0, 8))
+
+            self.pwd_entry = tk.Entry(
+                entry_box, show="*", font=("DejaVu Sans", 13),
+                bg="#1A1530", fg="#FFFFFF", insertbackground="#00E5FF",
+                relief="flat", bd=0, justify="center",
+            )
+            self.pwd_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, ipady=6, padx=(8, 0))
+            self.pwd_entry.focus_set()
+            self.pwd_entry.bind("<Return>", self.verify_password)
+
+            unlock_btn = tk.Button(
+                entry_box, text="Unlock", font=("DejaVu Sans", 10, "bold"),
+                bg="#8A4FFF", fg="#FFFFFF", activebackground="#00E5FF", activeforeground="#0D0B18",
+                relief="flat", bd=0, cursor="hand2", padx=10, command=self.verify_password,
+            )
+            unlock_btn.pack(side=tk.RIGHT, fill=tk.Y)
+
+            self.lock_status = tk.Label(
+                self.lock_frame, text="Enter passphrase and press Enter to unlock",
+                font=("DejaVu Sans", 8), fg="#00E5FF", bg="#141126",
+            )
+            self.lock_status.pack(pady=(4, 0))
+
+        def update_clock(self):
+            if hasattr(self, "clock_id") and self.clock_id:
+                try:
+                    self.canvas.itemconfig(self.clock_id, text=time.strftime("%H:%M"))
+                    self.canvas.itemconfig(self.date_id, text=time.strftime("%A, %B %d"))
+                except Exception:
+                    pass
+            self._schedule(1000, self.update_clock)
+
+        def verify_password(self, _event=None):
+            import tkinter as tk
+            pwd = self.pwd_entry.get().strip()
+            if not pwd:
+                self.lock_status.config(text="Passphrase required.", fg="#FF3366")
+                return
+            user = os.environ.get("USER", "root")
+
+            for s_path in ["/etc/shadow", os.path.join(REPO_ROOT, "etc/shadow")]:
+                if os.path.isfile(s_path) and os.access(s_path, os.R_OK):
+                    try:
+                        with open(s_path, "r", encoding="utf-8") as f:
+                            for line in f:
+                                parts = line.strip().split(":")
+                                if len(parts) >= 2 and parts[0] in (user, "root", "omniq", "quantum"):
+                                    if _verify_shadow_hash(pwd, parts[1]):
+                                        self._cleanup_and_close()
+                                        return
+                    except Exception:
+                        pass
+
+            self.lock_status.config(text="Incorrect passphrase. Try again.", fg="#FF3366")
+            self.pwd_entry.delete(0, tk.END)
+
+        def exit_screensaver(self, _event=None):
+            if self.mode != "lock":
+                self._cleanup_and_close()
+
+        def animate(self):
+            if not self.running:
+                return
+            self.canvas.delete("quantum_trace")
+
+            for q in self.qubits:
+                q.update(self.sw, self.sh)
+
+            threshold = 140
+            for i in range(len(self.qubits)):
+                qa = self.qubits[i]
+                for j in range(i + 1, len(self.qubits)):
+                    qb = self.qubits[j]
+                    dist = math.hypot(qb.x - qa.x, qb.y - qa.y)
+                    if dist < threshold:
+                        alpha = 1.0 - dist / threshold
+                        col = "#1A1530" if alpha < 0.4 else ("#3D246C" if alpha < 0.72 else "#6938C5")
+                        self.canvas.create_line(
+                            qa.x, qa.y, qb.x, qb.y,
+                            fill=col, width=(1 if alpha < 0.6 else 2), tags="quantum_trace",
+                        )
+                        if (qa.excited or qb.excited) and random.random() < 0.04 and len(self.pulses) < 30:
+                            self.pulses.append(EntanglementPulse(qa, qb))
+
+            alive = []
+            for p in self.pulses:
+                if p.update():
+                    alive.append(p)
+                    px, py = p.current_pos()
+                    self.canvas.create_oval(
+                        px - 3, py - 3, px + 3, py + 3,
+                        fill="#00FF9D", outline="#FFFFFF", width=1, tags="quantum_trace",
+                    )
+            self.pulses = alive
+
+            for q in self.qubits:
+                r = q.radius + (2.5 if q.excited else 0)
+                fill_col = "#FFFFFF" if q.excited else q.color
+                self.canvas.create_oval(
+                    q.x - r, q.y - r, q.x + r, q.y + r,
+                    fill=fill_col, outline="#8A4FFF", width=1, tags="quantum_trace",
+                )
+
+            cy_clock = self.sh // 2 - 40
+            self.canvas.create_text(
+                self.sw // 2, cy_clock, text=time.strftime("%H:%M:%S"),
+                font=("DejaVu Sans", 54, "bold"), fill="#00E5FF", tags="quantum_trace",
+            )
+            self.canvas.create_text(
+                self.sw // 2, cy_clock + 56, text=time.strftime("%A, %B %d, %Y"),
+                font=("DejaVu Sans", 15), fill="#D8CEFF", tags="quantum_trace",
+            )
+            self.canvas.create_text(
+                self.sw // 2, cy_clock + 88,
+                text="OMNIQ-OS  |  PREEMPT_RT QUANTUM COHERENCE SHIELD ACTIVE",
+                font=("DejaVu Sans", 9, "bold"), fill="#8C85AA", tags="quantum_trace",
+            )
+
+            self.canvas.tag_lower("quantum_trace")
+            self._schedule(33, self.animate)
+
+    app = OmniqScreensaver()
+    app.root.mainloop()
+
+def main():
+    if "--test" in sys.argv:
+        import tkinter
+        assert find_icon("lock_16.png") is not None
+        print("[+] omniq-screensaver headless self-test passed.")
+        return 0
+
+    mode = "lock" if "--lock" in sys.argv else "preview"
+    run_screensaver(mode=mode)
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

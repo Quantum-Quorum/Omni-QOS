@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
-"""
-OmniQ-OS: Standalone Pure Quantum Operating System Distro Builder
-Builds the pure, independent OmniQ-OS from scratch (Zero Ubuntu Desktop base):
-  1. Clean FHS Directory Tree (staging_rootfs/)
-  2. Rootless Kernel & Storage Module Extraction
-  3. Automated Recursive ELF Linker Resolver (only required .so libraries)
-  4. Quantum Acceleration Core (omniqd, qpu-smi, 16 quantum tools, Python SDK)
-  5. Pure POSIX /sbin/init (No systemd/GDM bloat, sub-second boot, < 200MB RAM)
-  6. Standalone CPIO initrd.img with custom /init (Live RAM, toram, persistence)
-  7. Pure Compressed filesystem.squashfs (mksquashfs -comp zstd)
-  8. Independent Bootable Hybrid ISO (xorriso) with Multi-Profile grub.cfg
-"""
 
 import os
 import sys
@@ -39,7 +26,6 @@ print(" OmniQ-OS: Standalone Pure Quantum Linux Distro Build Pipeline")
 print(" Zero Distro Base | Pure POSIX PID 1 | Automated Recursive ELF Resolver")
 print("=" * 80)
 
-# Clean work directory
 if os.path.exists(BUILD_ROOT):
     shutil.rmtree(BUILD_ROOT)
 os.makedirs(BUILD_ROOT, exist_ok=True)
@@ -47,9 +33,6 @@ os.makedirs(STAGING_ROOTFS, exist_ok=True)
 os.makedirs(INITRD_ROOT, exist_ok=True)
 os.makedirs(ISO_ROOT, exist_ok=True)
 
-# -----------------------------------------------------------------------------
-# PHASE 1: STAGING FHS DIRECTORY TREE ASSEMBLY
-# -----------------------------------------------------------------------------
 print("\n[Phase 1] Assembling Filesystem Hierarchy Standard (FHS) Tree...")
 fhs_dirs = [
     "bin", "sbin", "boot", "dev", "etc", "home/quantum", "lib",
@@ -61,11 +44,9 @@ fhs_dirs = [
 for d in fhs_dirs:
     os.makedirs(os.path.join(STAGING_ROOTFS, d), exist_ok=True)
 
-# Symlinks
 os.symlink("../run", os.path.join(STAGING_ROOTFS, "var/run"))
 os.symlink("usr/lib", os.path.join(STAGING_ROOTFS, "lib64"))
 
-# OS Release & Hostname
 with open(os.path.join(STAGING_ROOTFS, "etc/os-release"), "w") as f:
     f.write("""NAME="OmniQ-OS"
 VERSION="24.04-RT (Pure Quantum Edition)"
@@ -85,27 +66,22 @@ with open(os.path.join(STAGING_ROOTFS, "etc/hosts"), "w") as f:
 
 with open(os.path.join(STAGING_ROOTFS, "etc/issue"), "w") as f:
     f.write(r"""
-   ____                  _  ___           ____   _____ 
-  / __ \ ____ ___   ____ (_)/ _ \         / __ \ / ___/ 
- / / / // __ `__ \ / __ \ // // / ______ / / / / \__ \  
-/ /_/ // / / / / // / / // // /_//_____// /_/ / ___/ /  
-\____//_/ /_/ /_//_/ /_//_/ \___/        \____/ /____/   
+   ____                  _  ___           ____   _____
+  / __ \ ____ ___   ____ (_)/ _ \         / __ \ / ___/
+ / / / // __ `__ \ / __ \ // // / ______ / / / / \__ \
+/ /_/ // / / / / // / / // // /_//_____// /_/ / ___/ /
+\____//_/ /_/ /_//_/ /_//_/ \___/        \____/ /____/
        OmniQ-OS: Real-Time Quantum Linux (PREEMPT_RT)
 """)
 
-# -----------------------------------------------------------------------------
-# PHASE 2: ROOTLESS KERNEL & FOUNDATIONAL BINARIES EXTRACTION
-# -----------------------------------------------------------------------------
 print("\n[Phase 2] Rootless Extraction of Kernel and Core Binaries...")
 
-# 2a. Extract vmlinuz
 vmlinuz_dst = os.path.join(ISO_ROOT, "boot/vmlinuz")
 os.makedirs(os.path.dirname(vmlinuz_dst), exist_ok=True)
 print("Extracting vmlinuz from source...")
 subprocess.run(["bsdtar", "-xf", SOURCE_ISO, "-O", "casper/vmlinuz"], stdout=open(vmlinuz_dst, "wb"), check=True)
 shutil.copyfile(vmlinuz_dst, os.path.join(STAGING_ROOTFS, "boot/vmlinuz"))
 
-# 2b. Extract Core Executables (BusyBox, Bash, Python 3.12, Kmod, Udevadm)
 print("Extracting targeted core binaries from rootless package pool...")
 targeted_files = [
     "usr/bin/busybox",
@@ -118,7 +94,6 @@ targeted_files = [
 cmd_extract = ["unsquashfs", "-no-xattrs", "-f", "-d", STAGING_ROOTFS, SOURCE_SQUASHFS] + targeted_files
 subprocess.run(cmd_extract, check=True)
 
-# Create symlinks with correct relative targets
 os.symlink("../usr/bin/busybox", os.path.join(STAGING_ROOTFS, "bin/busybox"))
 os.symlink("../usr/bin/bash", os.path.join(STAGING_ROOTFS, "bin/bash"))
 os.symlink("../usr/bin/bash", os.path.join(STAGING_ROOTFS, "bin/sh"))
@@ -126,7 +101,6 @@ os.symlink("bash", os.path.join(STAGING_ROOTFS, "usr/bin/sh"))
 os.symlink("python3.12", os.path.join(STAGING_ROOTFS, "usr/bin/python3"))
 os.symlink("python3.12", os.path.join(STAGING_ROOTFS, "usr/bin/python"))
 
-# Symlink core BusyBox utilities into /usr/bin and /bin
 usr_bin_applets = [
     "env", "clear", "reset", "which", "head", "tail", "grep", "sed",
     "awk", "find", "xargs", "chmod", "chown", "ps", "top", "free",
@@ -146,7 +120,6 @@ for app in bin_applets:
         try: os.symlink("../usr/bin/busybox", lp)
         except Exception: pass
 
-# Symlink standard busybox utilities into /bin and /sbin
 busybox_tools = [
     "ls", "cp", "mv", "rm", "mkdir", "rmdir", "cat", "more", "head", "tail",
     "grep", "sed", "awk", "tar", "gzip", "gunzip", "dmesg", "ps", "kill",
@@ -164,12 +137,8 @@ for tool in sbin_tools:
     if not os.path.exists(link_path):
         os.symlink("../bin/busybox", link_path)
 
-# -----------------------------------------------------------------------------
-# PHASE 3: QUANTUM CORE USERLAND & PYTHON SDK INJECTION
-# -----------------------------------------------------------------------------
 print("\n[Phase 3] Injecting Quantum Accelerators, Daemon & 16 Domain Tools...")
 
-# 3a. Install Python SDKs into site-packages
 py_site = os.path.join(STAGING_ROOTFS, "usr/lib/python3.12/site-packages")
 shutil.copytree(os.path.join(BASE_DIR, "runtime/python/omniqos"), os.path.join(py_site, "omniqos"), dirs_exist_ok=True)
 dist_packages = os.path.join(STAGING_ROOTFS, "usr/lib/python3/dist-packages")
@@ -180,10 +149,8 @@ os.makedirs(dist_packages12, exist_ok=True)
 shutil.copytree(os.path.join(BASE_DIR, "runtime/python/omniqos"), os.path.join(dist_packages12, "omniqos"), dirs_exist_ok=True)
 shutil.copytree(os.path.join(WORKSPACE_DIR, "omniq-python/omniq"), os.path.join(py_site, "omniq"), dirs_exist_ok=True)
 
-# 3b. Install 16 Categorized Quantum CLI Tools in /usr/bin/
 bin_dir = os.path.join(STAGING_ROOTFS, "usr/bin")
 
-# 1. qpu-smi: Full ANSI Telemetry HUD
 with open(os.path.join(bin_dir, "qpu-smi"), "w") as f:
     f.write("""#!/usr/bin/env python3
 import sys, time, argparse
@@ -251,7 +218,6 @@ if __name__ == "__main__":
     main()
 """)
 
-# 2. omniqd: High-Performance Quantum Daemon
 with open(os.path.join(bin_dir, "omniqd"), "w") as f:
     f.write("""#!/usr/bin/env python3
 import sys, time, os, signal
@@ -289,10 +255,8 @@ while True:
     time.sleep(10)
 """)
 
-# 3. Permanent Disk Installer
 shutil.copyfile(os.path.join(BASE_DIR, "tools/omniq-installer"), os.path.join(bin_dir, "omniq-installer"))
 
-# 4-17. Domain Applications
 remaining_tools = [
     ("omniqd-ctl", "OmniQ Daemon Controller", "Managing omniqd accelerator service, UNIX domain socket & sysfs."),
     ("cryo-telemetry", "Cryostat Thermal Monitor", "Real-time 5-stage dilution refrigerator cryogenic monitor (50K -> 14.25 mK)."),
@@ -330,7 +294,6 @@ print("\\033[38;2;52;211;153mOperational status: NOMINAL\\033[0m")
 for f in os.listdir(bin_dir):
     os.chmod(os.path.join(bin_dir, f), 0o755)
 
-# Quantum Samples in /home/quantum/
 sample_dir = os.path.join(STAGING_ROOTFS, "home/quantum/samples")
 os.makedirs(sample_dir, exist_ok=True)
 with open(os.path.join(sample_dir, "vqe_h2.py"), "w") as f:
@@ -361,7 +324,6 @@ print("\\nOptimal Ground State Found at E = -1.1373 Hartree")
 """)
 os.chmod(os.path.join(sample_dir, "vqe_h2.py"), 0o755)
 
-# Bash prompt customization
 with open(os.path.join(STAGING_ROOTFS, "root/.bashrc"), "w") as f:
     f.write("""export PS1='\\[\\033[38;2;0;229;255m\\]quantum@omniq-core\\[\\033[00m\\]:\\[\\033[38;2;167;139;250m\\]\\w\\[\\033[00m\\]\\$ '
 cat /etc/issue
@@ -371,19 +333,14 @@ with open(os.path.join(STAGING_ROOTFS, "home/quantum/.bashrc"), "w") as f:
 cat /etc/issue
 """)
 
-# -----------------------------------------------------------------------------
-# PHASE 4: AUTOMATED RECURSIVE ELF LINKER RESOLVER
-# -----------------------------------------------------------------------------
 print("\n[Phase 4] Executing Automated Recursive ELF Linker Resolver...")
 
-# Index all files available from minimal.squashfs
 p_list = subprocess.run(["unsquashfs", "-l", SOURCE_SQUASHFS], capture_output=True, text=True, check=True)
 so_catalog = {}
 for line in p_list.stdout.splitlines():
     if ".so" in line or "ld-linux" in line:
         fname = os.path.basename(line)
         rel_path = line[len("squashfs-root/"):] if line.startswith("squashfs-root/") else line
-        # Prefer deep paths (like /usr/lib/aarch64-linux-gnu/...) over top-level symlinks
         if fname not in so_catalog or "aarch64-linux-gnu" in rel_path:
             so_catalog[fname] = rel_path
 
@@ -400,11 +357,9 @@ def get_dt_needed(filepath: str) -> List[str]:
     except Exception:
         return []
 
-# Crawl dependencies until 100% closure
 resolved_so = set()
 to_resolve = set()
 
-# Scan initial binaries
 for root, _, files in os.walk(STAGING_ROOTFS):
     for f in files:
         fpath = os.path.join(root, f)
@@ -412,7 +367,6 @@ for root, _, files in os.walk(STAGING_ROOTFS):
         for d in get_dt_needed(fpath):
             to_resolve.add(d)
 
-# Also ensure dynamic linker is in to_resolve
 to_resolve.add("ld-linux-aarch64.so.1")
 to_resolve.add("libpython3.12.so.1")
 os.makedirs(os.path.join(STAGING_ROOTFS, "etc/python3.12"), exist_ok=True)
@@ -424,10 +378,9 @@ while to_resolve:
     current = to_resolve.pop()
     if current in resolved_so: continue
     resolved_so.add(current)
-    
+
     if current in so_catalog:
         src_path = so_catalog[current]
-        # Recursively extract file and any symlink targets it points to
         extract_queue = [src_path]
         while extract_queue:
             c_path = extract_queue.pop()
@@ -443,8 +396,7 @@ while to_resolve:
 
         dst_path = os.path.join(STAGING_ROOTFS, src_path)
         manifest_entries.append((current, src_path))
-        
-        # Check newly extracted library's dependencies
+
         if os.path.exists(dst_path):
             real_dst = os.path.realpath(dst_path)
             for sub_dep in get_dt_needed(real_dst):
@@ -453,7 +405,6 @@ while to_resolve:
 
 print(f"Total recursive shared libraries resolved and injected: {len(resolved_so)}")
 
-# Symlink all libraries and dynamic linker cleanly into /lib and /usr/lib
 target_lib = os.path.join(STAGING_ROOTFS, "lib")
 for root, _, files in os.walk(os.path.join(STAGING_ROOTFS, "usr/lib")):
     for f in files:
@@ -473,12 +424,8 @@ with open(os.path.join(STAGING_ROOTFS, "etc/omniq/elf_manifest.txt"), "w") as f:
     for lib, path in sorted(manifest_entries):
         f.write(f"[OK] {lib:35s} -> /{path}\n")
 
-# -----------------------------------------------------------------------------
-# PHASE 5: PURE POSIX /sbin/init PID 1 IMPLEMENTATION
-# -----------------------------------------------------------------------------
 print("\n[Phase 5] Creating Pure POSIX /sbin/init PID 1 Engine...")
 
-# Create /etc/profile for clean interactive shells
 with open(os.path.join(STAGING_ROOTFS, "etc/profile"), "w") as f:
     f.write('''export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin
 export PYTHONPATH=/usr/lib/python3/dist-packages:/usr/lib/python3.12/dist-packages:/usr/lib/python3.12/site-packages
@@ -556,20 +503,14 @@ fi
 ''')
 os.chmod(init_script_path, 0o755)
 
-# -----------------------------------------------------------------------------
-# PHASE 6: STANDALONE INITRAMFS (initrd.img) & SQUASHFS COMPRESSION
-# -----------------------------------------------------------------------------
 print("\n[Phase 6] Building Standalone Live Initramfs & Compressing SquashFS...")
 
-# 6a. Populate initrd_root
 for d in ["bin", "sbin", "dev", "proc", "sys", "mnt", "newroot", "run", "etc", "lib/modules"]:
     os.makedirs(os.path.join(INITRD_ROOT, d), exist_ok=True)
 
-# Copy busybox into initrd
 shutil.copyfile(os.path.join(STAGING_ROOTFS, "usr/bin/busybox"), os.path.join(INITRD_ROOT, "bin/busybox"))
 os.chmod(os.path.join(INITRD_ROOT, "bin/busybox"), 0o755)
 
-# Create symlinks for essential busybox applets in bin/
 busybox_applets = [
     "sh", "mount", "umount", "mkdir", "echo", "cat", "sleep",
     "switch_root", "insmod", "mdev", "cp", "ls", "grep", "sed",
@@ -582,7 +523,6 @@ for app in busybox_applets:
         except Exception: pass
     os.symlink("busybox", app_path)
 
-# Extract and decompress boot-critical storage modules
 print("Extracting boot-critical storage drivers for initrd...")
 mod_dir = os.path.join(INITRD_ROOT, "lib/modules")
 staging_mod_dir = os.path.join(STAGING_ROOTFS, "lib/modules/6.14.0-27-generic")
@@ -621,7 +561,6 @@ while pos + 110 <= len(initrd_bytes):
 
 print(f"Injected {len(os.listdir(mod_dir))} boot-critical kernel drivers into initrd.")
 
-# Custom Standalone /init script
 initrd_init_path = os.path.join(INITRD_ROOT, "init")
 init_script_body = """#!/bin/sh
 # OmniQ-OS Standalone Live Boot Init Script
@@ -723,7 +662,6 @@ with open(initrd_init_path, "w") as f:
     f.write(init_script_body)
 os.chmod(initrd_init_path, 0o755)
 
-# Pack Standalone Initrd CPIO
 print("Archiving standalone initrd.img with directory nodes using CPIO and Zstandard...")
 cpio_buf = bytearray()
 ino_counter = 100
@@ -740,10 +678,8 @@ def add_cpio_entry(name, mode, content=b'', rmajor=0, rminor=0):
         while len(cpio_buf) % 4 != 0: cpio_buf.append(0)
     ino_counter += 1
 
-# 1. Root directory entry
 add_cpio_entry('.', 0o040755)
 
-# 2. Directory tree entries first (so kernel creates parents before files)
 for root, dirs, _ in os.walk(INITRD_ROOT):
     dirs.sort()
     for d in dirs:
@@ -751,11 +687,9 @@ for root, dirs, _ in os.walk(INITRD_ROOT):
         rel = os.path.relpath(dpath, INITRD_ROOT)
         add_cpio_entry(rel, 0o040755)
 
-# 3. Essential device nodes for early kernel console
 add_cpio_entry('dev/console', 0o020600, rmajor=5, rminor=1)
 add_cpio_entry('dev/null', 0o020666, rmajor=1, rminor=3)
 
-# 4. Files and symbolic links
 for root, _, files in os.walk(INITRD_ROOT):
     files.sort()
     for f in files:
@@ -770,7 +704,6 @@ for root, _, files in os.walk(INITRD_ROOT):
             mode = 0o100755 if (st.st_mode & 0o111) else 0o100644
             add_cpio_entry(rel, mode, content=c)
 
-# 5. CPIO Trailer
 t_name = b"TRAILER!!!\x00"
 t_hdr = f"070701{0:08X}{0:08X}{0:08X}{0:08X}{1:08X}{0:08X}{0:08X}{0:08X}{0:08X}{0:08X}{0:08X}{len(t_name):08X}{0:08X}".encode('ascii')
 cpio_buf.extend(t_hdr)
@@ -784,18 +717,13 @@ with open(INITRD_OUT, "wb") as f:
     f.write(p_comp.stdout)
 print(f"Generated standalone initrd.img: {INITRD_OUT} ({os.path.getsize(INITRD_OUT)} bytes)")
 
-# 6b. Compress Pure Staging RootFS into filesystem.squashfs
 print("Compressing staging_rootfs into pure filesystem.squashfs (Zstandard)...")
 SQUASH_OUT = os.path.join(ISO_ROOT, "filesystem.squashfs")
 subprocess.run(["mksquashfs", STAGING_ROOTFS, SQUASH_OUT, "-comp", "zstd", "-b", "1048576", "-noappend"], check=True)
 print(f"Generated pure filesystem.squashfs: {SQUASH_OUT} ({os.path.getsize(SQUASH_OUT)} bytes)")
 
-# -----------------------------------------------------------------------------
-# PHASE 7: PURE HYBRID BOOTABLE ISO PACKAGING (xorriso)
-# -----------------------------------------------------------------------------
 print("\n[Phase 7] Generating Pure Multi-Profile Bootloader & Standalone ISO...")
 
-# Create grub.cfg
 os.makedirs(os.path.join(ISO_ROOT, "boot/grub"), exist_ok=True)
 with open(os.path.join(ISO_ROOT, "boot/grub/grub.cfg"), "w") as f:
     f.write("""set default=0
@@ -835,7 +763,6 @@ menuentry "OmniQ-OS 24.04-RT (Persistent Live Session)" {
 }
 """)
 
-# Package with xorriso
 if os.path.exists(OUTPUT_ISO):
     os.remove(OUTPUT_ISO)
 

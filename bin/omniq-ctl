@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+import urllib.request
+
+CYAN = "\033[38;2;0;229;255m"
+GREEN = "\033[38;2;0;255;157m"
+VIOLET = "\033[38;2;138;79;255m"
+RED = "\033[38;2;255;51;102m"
+RESET = "\033[0m"
+
+def _request(method: str, path: str, payload: dict = None):
+    url = f"http://127.0.0.1:9090{path}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"} if data else {})
+    try:
+        with urllib.request.urlopen(req, timeout=1.2) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        omniqd_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "omniqd")
+        loader = importlib.machinery.SourceFileLoader("omniqd_mod", omniqd_path)
+        spec = importlib.util.spec_from_loader("omniqd_mod", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        d = mod.OmniQRealTimeDaemon()
+        if path == "/api/status":
+            return d.get_status()
+        if path == "/api/burst":
+            return d.trigger_pulse_burst()
+        if path == "/api/interlock/trip":
+            return d.trip_interlock("CLI_TRIP")
+        if path == "/api/interlock/reset":
+            return d.reset_interlock()
+        if path == "/api/cryo_temp":
+            return d.set_cryo_temp(float((payload or {}).get("temp_mK", 14.25)))
+        return d.get_status()
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print("Usage: omniq-ctl [status|burst|trip|reset|temp <mK>|core|--json|--test]")
+        return
+
+    cmd = args[0]
+    if cmd == "--test":
+        st = _request("GET", "/api/status")
+        assert st["total_qubits"] == 127
+        print("[PASS] omniq-ctl verified.")
+        return
+
+    if cmd in ("status", "--json"):
+        st = _request("GET", "/api/status")
+        if cmd == "--json" or "--json" in args:
+            print(json.dumps(st, indent=2))
+        else:
+            cryo = st["cryo"]
+            ic = f"{RED}TRIPPED (0x00 CLAMP){RESET}" if cryo["interlock_tripped"] else f"{GREEN}ARMED (< 50 mK){RESET}"
+            print(f"{CYAN}=== OmniQ-OS Real-Time Quantum Telemetry ==={RESET}")
+            print(f" Device      : {st['device_name']} ({st['total_qubits']}Q, {st['total_couplers']} Couplers)")
+            print(f" Kernel      : {st['kernel']} | Jitter: {st['jitter_us']} us")
+            print(f" QEC Loop    : {GREEN}{st['qec_loop_ns']} ns{RESET} (GPUDirect-QPU < 600 ns)")
+            print(f" MXC Temp    : {cryo['mxc_mK']:.3f} mK | Interlock: {ic}")
+            print(f" Avg T1 / T2 : {st['avg_t1_us']} us / {st['avg_t2_us']} us")
+    elif cmd == "burst":
+        print(json.dumps(_request("POST", "/api/burst", {}), indent=2))
+    elif cmd == "trip":
+        print(json.dumps(_request("POST", "/api/interlock/trip", {"reason": "CLI_MANUAL_TRIP"}), indent=2))
+    elif cmd == "reset":
+        print(json.dumps(_request("POST", "/api/interlock/reset", {}), indent=2))
+    elif cmd == "temp" and len(args) > 1:
+        print(json.dumps(_request("POST", "/api/cryo_temp", {"temp_mK": float(args[1])}), indent=2))
+    elif cmd == "core":
+        st = _request("GET", "/api/status")
+        print(json.dumps(st.get("core_engine", {}), indent=2))
+    else:
+        print(f"Unknown command: {cmd}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

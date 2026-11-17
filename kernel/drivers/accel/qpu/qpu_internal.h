@@ -1,12 +1,3 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/*
- * OmniQ-OS: Real-Time Quantum Linux Kernel Driver
- *
- * Internal header for drivers/accel/qpu/
- *
- * Copyright (C) 2026 OmniQ Project.
- */
-
 #ifndef _QPU_INTERNAL_H
 #define _QPU_INTERNAL_H
 
@@ -22,6 +13,8 @@
 #else
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <sys/types.h>
 #include <pthread.h>
 #ifndef __user
 #define __user
@@ -35,11 +28,11 @@ struct file;
 #define QPU_DRIVER_VERSION "0.1.0-rt"
 #define QPU_DEV_NAME       "accel/qpu0"
 
+#define QPU_DMA_RING_SIZE  (64 * 1024)
 #define QPU_MAX_PARTITIONS 16
 #define QPU_DEFAULT_QUBITS 127
 #define QPU_DEFAULT_COUPLERS 144
 
-/* Qubit Allocation State */
 enum qpu_qubit_alloc_state {
 	QUBIT_FREE = 0,
 	QUBIT_ALLOCATED = 1,
@@ -47,7 +40,6 @@ enum qpu_qubit_alloc_state {
 	QUBIT_DEFECTIVE = 3,
 };
 
-/* Internal Partition Tracking */
 struct qpu_partition {
 	__u32 partition_id;
 	__u32 owner_pid;
@@ -60,7 +52,6 @@ struct qpu_partition {
 	__u64 created_ns;
 };
 
-/* Completed Job Result Cache */
 struct qpu_job_entry {
 	__u64 job_id;
 	__u32 partition_id;
@@ -73,7 +64,6 @@ struct qpu_job_entry {
 	struct qpu_job_entry *next;
 };
 
-/* Main QPU Device Structure */
 struct qpu_device {
 	struct device *dev;
 	dev_t devt;
@@ -89,39 +79,52 @@ struct qpu_device {
 	pthread_mutex_t lock;
 #endif
 
-	/* Operating State */
-	__u32 operating_state;    /* QPU_STATE_* */
-	__u32 technology;         /* QPU_TECH_* */
+	__u32 operating_state;
+	__u32 technology;
 	char  device_name[QPU_MAX_NAME_LEN];
 
-	/* Cryo Telemetry */
 	struct qpu_cryo_telemetry cryo;
 
-	/* Physical Topology & Health */
 	__u16 total_qubits;
 	__u16 total_couplers;
 	enum qpu_qubit_alloc_state qubit_states[QPU_MAX_QUBITS];
 	struct qpu_qubit_info calibration[QPU_MAX_QUBITS];
 	struct qpu_coupler_edge couplers[QPU_MAX_COUPLERS];
 
-	/* Spatial Partitions (QMMU) */
 	struct qpu_partition partitions[QPU_MAX_PARTITIONS];
 	__u32 next_partition_id;
 
-	/* Job Queue & Results */
 	__u64 next_job_id;
 	struct qpu_job_entry *job_history_head;
 
-	/* Fallback Simulator State */
+	void  *dma_ring_virt;
+	size_t dma_ring_size;
+	__u64  last_dma_bench_ns;
+#ifdef __KERNEL__
+	dma_addr_t dma_ring_phys;
+	bool       dma_is_coherent;
+#endif
+
 	bool is_emulated;
+
+	bool  interlock_tripped;
+	bool  rf_dac_clamped;
+	__u64 interlock_trip_count;
+	char  interlock_reason[64];
 };
 
-/* Global Device Singleton */
 extern struct qpu_device *g_qpu_dev;
 
-/* Subsystem Function Prototypes */
 int  qpu_pci_init(struct qpu_device *qdev);
 void qpu_pci_cleanup(struct qpu_device *qdev);
+
+int  qpu_dma_init(struct qpu_device *qdev);
+void qpu_dma_cleanup(struct qpu_device *qdev);
+int  qpu_dma_benchmark_ring(struct qpu_device *qdev, __u64 bytes, __u32 *out_ns);
+#ifdef __KERNEL__
+struct dma_buf;
+struct dma_buf *qpu_dma_export_ring(struct qpu_device *qdev);
+#endif
 
 int  qpu_sysfs_init(struct qpu_device *qdev);
 void qpu_sysfs_cleanup(struct qpu_device *qdev);
@@ -131,6 +134,7 @@ int  qpu_qmmu_alloc(struct qpu_device *qdev, struct qpu_alloc_request *req, __u3
 int  qpu_qmmu_free(struct qpu_device *qdev, struct qpu_free_request *req, __u32 pid);
 
 int  qpu_fallback_init(struct qpu_device *qdev);
+void qpu_fallback_cleanup(struct qpu_device *qdev);
 int  qpu_fallback_submit_job(struct qpu_device *qdev, struct qpu_job_submission *job);
 int  qpu_fallback_read_results(struct qpu_device *qdev, struct qpu_results_read *res);
 
@@ -139,4 +143,4 @@ void qpu_keepalive_stop(struct qpu_device *qdev);
 
 long qpu_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 
-#endif /* _QPU_INTERNAL_H */
+#endif

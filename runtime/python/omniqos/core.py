@@ -1,8 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-"""
-OmniQ-OS: Core C-Bindings and Quantum Accelerator Abstraction
-"""
-
 import os
 import sys
 import ctypes
@@ -23,16 +18,15 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import List, Dict, Optional, Tuple
 
-# Load Native C Library
 def _find_and_load_lib():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
-        # Relative build paths
         os.path.join(base_dir, "..", "..", "libomniq-qpu", "libomniq_qpu.dylib"),
         os.path.join(base_dir, "..", "..", "libomniq-qpu", "libomniq_qpu.so"),
         os.path.join(base_dir, "libomniq_qpu.dylib"),
         os.path.join(base_dir, "libomniq_qpu.so"),
-        # Installed system paths
+        os.path.join(base_dir, "..", "..", "..", "lib", "libomniq_qpu.so"),
+        "/opt/omniq/lib/libomniq_qpu.so",
         "/usr/local/lib/libomniq_qpu.dylib",
         "/usr/local/lib/libomniq_qpu.so",
         "/usr/lib/libomniq_qpu.so",
@@ -43,7 +37,6 @@ def _find_and_load_lib():
                 return ctypes.CDLL(p)
             except Exception as e:
                 pass
-    # Try dynamic loader
     lib_name = "libomniq_qpu.dylib" if sys.platform == "darwin" else "libomniq_qpu.so"
     try:
         return ctypes.CDLL(lib_name)
@@ -52,7 +45,6 @@ def _find_and_load_lib():
 
 _LIB = _find_and_load_lib()
 
-# Enums matching UAPI
 class QPUOperatingState(IntEnum):
     ONLINE_HARDWARE = 0x00
     OFFLINE_MAINTENANCE = 0x01
@@ -66,7 +58,6 @@ class QPUTechnology(IntEnum):
     PHOTONIC = 0x04
     SIMULATED = 0x05
 
-# C Structures matching UAPI
 class _QCryoTelemetry(Structure):
     _fields_ = [
         ("temp_50k_mK", c_uint32),
@@ -146,7 +137,26 @@ class _QResultsRead(Structure):
         ("execution_time_ns", c_uint64),
     ]
 
-# Setup C Function Signatures if Library is present
+class _QInterlockState(Structure):
+    _fields_ = [
+        ("tripped", c_uint32),
+        ("rf_dac_clamped", c_uint32),
+        ("temp_mxc_mK", c_uint32),
+        ("threshold_mK", c_uint32),
+        ("trip_count", c_uint64),
+        ("reason", c_char * 64),
+    ]
+
+class _QP2PDmaDesc(Structure):
+    _fields_ = [
+        ("dma_buf_fd", c_int32),
+        ("partition_id", c_uint32),
+        ("buffer_size_bytes", c_uint64),
+        ("gpu_vram_pci_addr", c_uint64),
+        ("p2p_status", c_uint32),
+        ("latency_budget_ns", c_uint32),
+    ]
+
 if _LIB:
     _LIB.qpu_open.restype = c_void_p
     _LIB.qpu_open.argtypes = [ctypes.c_char_p]
@@ -174,6 +184,19 @@ if _LIB:
 
     _LIB.qpu_reset_qubit.restype = c_int32
     _LIB.qpu_reset_qubit.argtypes = [c_void_p, c_uint16]
+
+    if hasattr(_LIB, "qpu_trip_interlock"):
+        _LIB.qpu_trip_interlock.restype = c_int32
+        _LIB.qpu_trip_interlock.argtypes = [c_void_p, ctypes.c_char_p, POINTER(_QInterlockState)]
+        _LIB.qpu_reset_interlock.restype = c_int32
+        _LIB.qpu_reset_interlock.argtypes = [c_void_p, POINTER(_QInterlockState)]
+        _LIB.qpu_set_cryo_temp.restype = c_int32
+        _LIB.qpu_set_cryo_temp.argtypes = [c_void_p, c_uint32, POINTER(_QInterlockState)]
+        _LIB.qpu_get_interlock.restype = c_int32
+        _LIB.qpu_get_interlock.argtypes = [c_void_p, POINTER(_QInterlockState)]
+    if hasattr(_LIB, "qpu_configure_gpudirect"):
+        _LIB.qpu_configure_gpudirect.restype = c_int32
+        _LIB.qpu_configure_gpudirect.argtypes = [c_void_p, c_int32, c_uint64, c_uint64, POINTER(_QP2PDmaDesc)]
 
 @dataclass
 class QPUTopology:
@@ -262,7 +285,6 @@ class QPU:
 
     def get_topology(self) -> QPUTopology:
         if self._sim_mode:
-            # Generate 127-qubit heavy-hex coupler lattice
             couplers = []
             for i in range(126):
                 if (i + 1) % 16 != 0:
@@ -272,8 +294,8 @@ class QPU:
             return QPUTopology(
                 driver_version="1.2.0-rt",
                 device_name="OmniQ Transmon 127-Qubit Cryogenic Array",
-                operating_state=QPUOperatingState.ONLINE_HARDWARE,
-                technology=QPUTechnology.SUPERCONDUCTING,
+                operating_state=QPUOperatingState.SIMULATOR,
+                technology=QPUTechnology.SIMULATED,
                 total_qubits=127,
                 total_couplers=len(couplers),
                 mixing_chamber_temp_mK=14.250,
@@ -299,8 +321,8 @@ class QPU:
             total_qubits=top.total_qubits,
             total_couplers=top.total_couplers,
             mixing_chamber_temp_mK=top.cryo.temp_mxc_mK / 1000.0,
-            avg_t1_us=(top.global_avg_t1_ns / 1000.0) / 1000.0,
-            avg_t2_us=(top.global_avg_t2_ns / 1000.0) / 1000.0,
+            avg_t1_us=top.global_avg_t1_ns / 1000.0,
+            avg_t2_us=top.global_avg_t2_ns / 1000.0,
             couplers=couplers,
         )
 
@@ -343,7 +365,6 @@ class QPU:
 
     def allocate_partition(self, num_qubits: int, guard_hops: int = 1, flags: int = 0) -> QPUPartition:
         if self._sim_mode:
-            # Find contiguous free qubits
             start_q = 0
             while start_q + num_qubits <= 127:
                 candidate = set(range(start_q, start_q + num_qubits))
@@ -391,61 +412,20 @@ class QPU:
 
     def submit(self, partition_id: int, qasm_str: str, shots: int = 1000) -> QPUJob:
         if self._sim_mode:
-            import random
-            import math
-            counts: Dict[str, int] = {}
-            # Check circuit characteristics
-            lower = qasm_str.lower()
-            if "bell" in lower or ("h q[0]" in lower and "cx q[0], q[1]" in lower):
-                # Bell state: 50% |00> and 50% |11>
-                s00 = int(shots * (0.49 + 0.02 * random.random()))
-                s11 = shots - s00
-                counts = {"00": s00, "11": s11}
-                width = 2
-            elif "ghz" in lower or ("cx q[1], q[2]" in lower and "h q[0]" in lower):
-                # GHZ state: 50% |000> and 50% |111>
-                s000 = int(shots * (0.49 + 0.02 * random.random()))
-                s111 = shots - s000
-                counts = {"000": s000, "111": s111}
-                width = 3
-            elif "rx(" in lower or "vqe" in lower:
-                # VQE parameterized trial
-                theta = 0.5
-                for line in qasm_str.splitlines():
-                    if "rx(" in line:
-                        try:
-                            theta = float(line.split("rx(")[1].split(")")[0])
-                        except Exception:
-                            pass
-                p01 = math.sin(theta / 2.0) ** 2
-                s01 = int(shots * p01)
-                s00 = shots - s01
-                counts = {"01": s01, "00": s00}
-                width = 2
-            else:
-                # Default 2-qubit or detected qubit count
-                width = 2
-                for line in qasm_str.splitlines():
-                    if "qubit[" in line:
-                        try:
-                            width = int(line.split("qubit[")[1].split("]")[0])
-                        except Exception:
-                            pass
-                # Generate valid distribution
-                targets = [format(0, f"0{width}b"), format(2**width - 1, f"0{width}b")]
-                remaining = shots
-                for t in targets[:-1]:
-                    cnt = random.randint(int(remaining * 0.4), int(remaining * 0.6))
-                    counts[t] = cnt
-                    remaining -= cnt
-                counts[targets[-1]] = remaining
+            import time as _time
+            from omniq.circuit import Circuit
 
+            t0 = _time.perf_counter_ns()
+            circ = Circuit.from_qasm(qasm_str)
+            counts = circ.sample(shots=shots)
+            dt_ns = max(1, _time.perf_counter_ns() - t0)
+            self._next_part_id += 1
             return QPUJob(
-                job_id=random.randint(1000, 9999),
+                job_id=self._next_part_id,
                 partition_id=partition_id,
                 shots=shots,
-                bitstring_width=width,
-                execution_time_ns=int(shots * 45.2),
+                bitstring_width=circ.num_qubits,
+                execution_time_ns=dt_ns,
                 counts=counts,
             )
 
@@ -455,15 +435,13 @@ class QPU:
         if ret != 0:
             raise RuntimeError(f"Failed to submit circuit (ret={ret})")
 
-        # Retrieve results
-        raw_bytes_needed = shots * 8 # Upper bound buffer
+        raw_bytes_needed = shots * 8
         buf = (c_uint8 * raw_bytes_needed)()
         res_meta = _QResultsRead()
         ret = _LIB.qpu_await_results(self._ctx, job_id.value, shots, buf, byref(res_meta))
         if ret != 0:
             raise RuntimeError(f"Failed to read results for job {job_id.value} (ret={ret})")
 
-        # Parse bitstrings into counts dict
         counts = {}
         width = res_meta.bitstring_width
         stride = (width + 7) // 8
@@ -474,7 +452,7 @@ class QPU:
             for bit_idx in range(width):
                 byte_val = buf[offset + (bit_idx // 8)]
                 bit = (byte_val >> (bit_idx % 8)) & 1
-                bitstr = str(bit) + bitstr # Big-endian display
+                bitstr = str(bit) + bitstr
             counts[bitstr] = counts.get(bitstr, 0) + 1
 
         return QPUJob(
@@ -493,4 +471,69 @@ class QPU:
         ret = _LIB.qpu_reset_qubit(self._ctx, qubit_id)
         if ret != 0:
             raise RuntimeError(f"Failed to reset qubit {qubit_id} (ret={ret})")
+
+    def get_interlock(self) -> Dict[str, object]:
+        if self._sim_mode or not hasattr(_LIB, "qpu_get_interlock"):
+            return {
+                "tripped": False,
+                "rf_dac_clamped": False,
+                "temp_mxc_mK": 14.250,
+                "threshold_mK": 50.000,
+                "trip_count": 0,
+                "reason": "NOMINAL (< 50.000 mK)",
+            }
+        st = _QInterlockState()
+        ret = _LIB.qpu_get_interlock(self._ctx, byref(st))
+        if ret != 0:
+            raise RuntimeError(f"Failed to query interlock (ret={ret})")
+        return {
+            "tripped": bool(st.tripped),
+            "rf_dac_clamped": bool(st.rf_dac_clamped),
+            "temp_mxc_mK": st.temp_mxc_mK / 1000.0,
+            "threshold_mK": st.threshold_mK / 1000.0,
+            "trip_count": int(st.trip_count),
+            "reason": st.reason.decode("utf-8", errors="ignore"),
+        }
+
+    def trip_interlock(self, reason: str = "MANUAL_EMERGENCY_RF_CLAMP") -> Dict[str, object]:
+        if self._sim_mode or not hasattr(_LIB, "qpu_trip_interlock"):
+            return {"tripped": True, "rf_dac_clamped": True, "reason": reason}
+        st = _QInterlockState()
+        ret = _LIB.qpu_trip_interlock(self._ctx, reason.encode("utf-8"), byref(st))
+        if ret != 0:
+            raise RuntimeError(f"Failed to trip interlock (ret={ret})")
+        return self.get_interlock()
+
+    def reset_interlock(self) -> Dict[str, object]:
+        if self._sim_mode or not hasattr(_LIB, "qpu_reset_interlock"):
+            return {"tripped": False, "rf_dac_clamped": False, "reason": "NOMINAL"}
+        st = _QInterlockState()
+        ret = _LIB.qpu_reset_interlock(self._ctx, byref(st))
+        if ret != 0:
+            raise RuntimeError(f"Cannot reset interlock while MXC >= 50.000 mK (ret={ret})")
+        return self.get_interlock()
+
+    def set_cryo_temp_mK(self, temp_mK: float) -> Dict[str, object]:
+        if self._sim_mode or not hasattr(_LIB, "qpu_set_cryo_temp"):
+            return {"tripped": temp_mK >= 50.0, "temp_mxc_mK": temp_mK}
+        st = _QInterlockState()
+        ret = _LIB.qpu_set_cryo_temp(self._ctx, int(round(temp_mK * 1000.0)), byref(st))
+        if ret != 0:
+            raise RuntimeError(f"Failed to set cryo temp (ret={ret})")
+        return self.get_interlock()
+
+    def test_dma_ring(self, size_bytes: int = 4096) -> Dict[str, int]:
+        if self._sim_mode or not hasattr(_LIB, "qpu_configure_gpudirect"):
+            import time as _time
+            buf = bytearray(size_bytes)
+            t0 = _time.perf_counter_ns()
+            buf[0] = 0x5A
+            buf[-1] = 0xA5
+            dt = max(1, _time.perf_counter_ns() - t0)
+            return {"status": 0, "measured_ring_ns": dt}
+        desc = _QP2PDmaDesc()
+        ret = _LIB.qpu_configure_gpudirect(self._ctx, -1, 0, int(size_bytes), byref(desc))
+        if ret != 0:
+            raise RuntimeError(f"Failed DMA ring benchmark (ret={ret})")
+        return {"status": int(desc.p2p_status), "measured_ring_ns": int(desc.latency_budget_ns)}
 

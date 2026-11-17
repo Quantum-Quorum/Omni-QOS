@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
-"""
-OmniQ-OS: Automated Recursive ELF Linker Resolver
-Scans every executable binary and shared library (.so) across rootfs staging directories
-(/bin, /sbin, /usr/bin, /usr/sbin, /lib, /usr/lib, driver trees, and python extensions),
-recursively resolves direct and transitive ELF shared library dependencies (DT_NEEDED),
-verifies dependency closure, and generates a full integrity manifest.
-"""
 
 import os
 import sys
@@ -14,7 +6,6 @@ import struct
 import argparse
 from typing import Dict, Set, List, Tuple
 
-# ELF Magic and Constants
 EI_NIDENT = 16
 ELF_MAGIC = b"\x7fELF"
 ELFCLASS32 = 1
@@ -65,7 +56,6 @@ class ELFParser:
                     e_type, e_machine, e_version, e_entry, e_phoff, e_shoff, e_flags, e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx = \
                         struct.unpack(endian + "HHIIIIIHHHHHH", header[16:52])
 
-                # Parse Program Headers to locate PT_DYNAMIC and PT_INTERP
                 f.seek(e_phoff)
                 ph_headers = []
                 for _ in range(e_phnum):
@@ -95,7 +85,6 @@ class ELFParser:
                 if dynamic_offset is None or dynamic_size is None:
                     return
 
-                # Read Dynamic Table
                 f.seek(dynamic_offset)
                 dyn_entries = []
                 entry_size = 16 if self.is_64bit else 8
@@ -109,7 +98,6 @@ class ELFParser:
                         break
                     dyn_entries.append((d_tag, d_val))
 
-                # Find STRTAB address / offset
                 strtab_vaddr = None
                 for d_tag, d_val in dyn_entries:
                     if d_tag == DT_STRTAB:
@@ -119,7 +107,6 @@ class ELFParser:
                 if strtab_vaddr is None:
                     return
 
-                # Convert strtab_vaddr to file offset using PT_LOAD
                 strtab_file_offset = None
                 for p_type, p_offset, p_filesz, p_vaddr in ph_headers:
                     if p_type == PT_LOAD:
@@ -153,7 +140,6 @@ class ELFParser:
         except Exception:
             pass
 
-
 class RecursiveELFResolver:
     def __init__(self, rootfs_dir: str, extra_lib_dirs: List[str] = None):
         self.rootfs = os.path.abspath(rootfs_dir)
@@ -164,7 +150,6 @@ class RecursiveELFResolver:
         self._build_lib_index()
 
     def _build_lib_index(self):
-        """Index all available libraries across standard FHS rootfs paths."""
         search_paths = [
             os.path.join(self.rootfs, "lib"),
             os.path.join(self.rootfs, "lib64"),
@@ -189,7 +174,6 @@ class RecursiveELFResolver:
                             self.lib_cache[f] = os.path.join(root, f)
 
     def scan_target(self, scan_dirs: List[str]) -> Tuple[int, int, Dict[str, Set[str]]]:
-        """Scan directories for ELF binaries and recursively resolve all dependencies."""
         elf_files = []
         for d in scan_dirs:
             full_d = os.path.join(self.rootfs, d) if not os.path.isabs(d) else d
@@ -214,8 +198,7 @@ class RecursiveELFResolver:
                 total_elf += 1
                 rel_path = os.path.relpath(fpath, self.rootfs)
                 self.scanned_elfs[rel_path] = parser
-                
-                # Check needed dependencies
+
                 for needed in parser.needed_libs:
                     if needed not in self.lib_cache:
                         if rel_path not in self.missing_deps:
@@ -225,7 +208,6 @@ class RecursiveELFResolver:
         return total_scanned, total_elf, self.missing_deps
 
     def generate_manifest(self, output_path: str):
-        """Generate a complete recursive ELF dependency and closure manifest."""
         with open(output_path, "w") as f:
             f.write("=" * 80 + "\n")
             f.write(" OmniQ-OS: Automated Recursive ELF Linker Resolution Manifest\n")
@@ -267,7 +249,6 @@ class RecursiveELFResolver:
                 f.write("\n" + "=" * 80 + "\n")
                 f.write(" [SUCCESS] 100% Dependency Closure: All ELF binaries resolved cleanly.\n")
                 f.write("=" * 80 + "\n")
-
 
 def main():
     parser = argparse.ArgumentParser(description="OmniQ-OS Recursive ELF Linker Resolver")

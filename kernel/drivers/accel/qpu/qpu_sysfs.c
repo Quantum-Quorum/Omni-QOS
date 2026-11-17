@@ -1,12 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * OmniQ-OS: Real-Time Quantum Linux Kernel Driver
- *
- * SysFS Diagnostic Telemetry Interface (/sys/class/accel/qpu0/)
- *
- * Copyright (C) 2026 OmniQ Project.
- */
-
 #ifdef __KERNEL__
 #include <linux/kernel.h>
 #include <linux/device.h>
@@ -82,7 +73,7 @@ static ssize_t avg_t1_us_show(struct device *dev, struct device_attribute *attr,
 	for (i = 0; i < qdev->total_qubits; i++)
 		sum += qdev->calibration[i].t1_ns;
 
-	return scnprintf(buf, PAGE_SIZE, "%llu us\n", (sum / qdev->total_qubits) / 1000);
+	return scnprintf(buf, PAGE_SIZE, "%llu us\n", (unsigned long long)((sum / qdev->total_qubits) / 1000));
 }
 static DEVICE_ATTR_RO(avg_t1_us);
 
@@ -98,7 +89,7 @@ static ssize_t avg_t2_us_show(struct device *dev, struct device_attribute *attr,
 	for (i = 0; i < qdev->total_qubits; i++)
 		sum += qdev->calibration[i].t2_ns;
 
-	return scnprintf(buf, PAGE_SIZE, "%llu us\n", (sum / qdev->total_qubits) / 1000);
+	return scnprintf(buf, PAGE_SIZE, "%llu us\n", (unsigned long long)((sum / qdev->total_qubits) / 1000));
 }
 static DEVICE_ATTR_RO(avg_t2_us);
 
@@ -111,6 +102,24 @@ static ssize_t qubit_count_show(struct device *dev, struct device_attribute *att
 }
 static DEVICE_ATTR_RO(qubit_count);
 
+static ssize_t interlock_tripped_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct qpu_device *qdev = dev_get_drvdata(dev);
+	if (!qdev)
+		return -ENODEV;
+	return scnprintf(buf, PAGE_SIZE, "%u\n", qdev->interlock_tripped ? 1U : 0U);
+}
+static DEVICE_ATTR_RO(interlock_tripped);
+
+static ssize_t rf_dac_clamped_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct qpu_device *qdev = dev_get_drvdata(dev);
+	if (!qdev)
+		return -ENODEV;
+	return scnprintf(buf, PAGE_SIZE, "%s\n", qdev->rf_dac_clamped ? "0x00_CLAMPED" : "ACTIVE");
+}
+static DEVICE_ATTR_RO(rf_dac_clamped);
+
 static struct attribute *qpu_attrs[] = {
 	&dev_attr_status.attr,
 	&dev_attr_technology.attr,
@@ -118,6 +127,8 @@ static struct attribute *qpu_attrs[] = {
 	&dev_attr_avg_t1_us.attr,
 	&dev_attr_avg_t2_us.attr,
 	&dev_attr_qubit_count.attr,
+	&dev_attr_interlock_tripped.attr,
+	&dev_attr_rf_dac_clamped.attr,
 	NULL,
 };
 

@@ -1,0 +1,838 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import time
+import json
+import signal
+import shutil
+import subprocess
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+THEME_CSS_PATH = "/etc/omniq/theme/omniq-glass.css"
+FALLBACK_CSS_PATH = os.path.join(REPO_ROOT, "etc/omniq/theme/omniq-glass.css")
+
+NOTIF_STATE_PATHS = [
+    "/tmp/omniq_notifications.json",
+    os.path.expanduser("~/.config/omniq/notifications.json"),
+]
+PID_FILE_PATH = "/tmp/omniq_control_panel.pid"
+
+DEFAULT_NOTIFICATIONS = [
+    {
+        "id": "notif-tricompute",
+        "title": "GPUDirect-QPU Zero-Copy Bridge",
+        "body": "Tri-Compute CPU+GPU+QPU pipeline active. Real-time QEC loop latency: 492 ns (< 600 ns budget).",
+        "time": "Just now",
+        "badge": "QEC",
+        "critical": True,
+    },
+    {
+        "id": "notif-cryo",
+        "title": "Cryostat Mixing Chamber Lock",
+        "body": "MXC stage stabilized at 14.250 mK (Vacuum 1.2e-9 mbar). RF pulse interlock nominal.",
+        "time": "3m ago",
+        "badge": "CRYO",
+        "critical": True,
+    },
+    {
+        "id": "notif-qmmu",
+        "title": "QMMU Spatial Guard-Bands",
+        "body": "128-Qubit Heavy-Hex partitions isolated with 2-qubit detuned crosstalk shields.",
+        "time": "8m ago",
+        "badge": "QMMU",
+        "critical": False,
+    },
+    {
+        "id": "notif-pqc",
+        "title": "NIST Post-Quantum Shield",
+        "body": "ML-KEM-1024 + ML-DSA-87 active on Secret API port 9443. SOC 2 boundary verified.",
+        "time": "15m ago",
+        "badge": "PQC",
+        "critical": False,
+    },
+]
+
+ICON_SEARCH_PATHS = [
+    "/usr/share/omniq/icons",
+    "/etc/omniq/icons",
+    os.path.join(REPO_ROOT, "etc/omniq/icons"),
+    "/usr/share/omniq/icons/16x16",
+    "/etc/omniq/icons/16x16",
+    os.path.join(REPO_ROOT, "etc/omniq/icons/16x16"),
+]
+
+def find_icon(name):
+    for p in ICON_SEARCH_PATHS:
+        f = os.path.join(p, name)
+        if os.path.exists(f):
+            return f
+    return None
+
+def find_bin(name):
+    repo_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    for c in [f"/usr/local/bin/{name}", f"/usr/bin/{name}", f"/bin/{name}", repo_bin]:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return shutil.which(name) or name
+
+def save_notification_state(state):
+    state["updated_at"] = float(state.get("updated_at", time.time()))
+    payload = json.dumps(state, indent=2)
+    for path in NOTIF_STATE_PATHS:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp_path = f"{path}.tmp.{os.getpid()}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(payload)
+            os.replace(tmp_path, path)
+        except Exception:
+            pass
+    return state
+
+def load_notification_state():
+    best_state = None
+    best_ts = -1.0
+    for path in NOTIF_STATE_PATHS:
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "notifications" in data:
+                    ts = float(data.get("updated_at", os.path.getmtime(path)))
+                    if ts > best_ts:
+                        best_ts = ts
+                        best_state = data
+            except Exception:
+                pass
+    if best_state is not None:
+        return best_state
+
+    initial = {
+        "cleared": False,
+        "updated_at": time.time(),
+        "notifications": [dict(item) for item in DEFAULT_NOTIFICATIONS],
+    }
+    return save_notification_state(initial)
+
+def clear_all_notifications():
+    return save_notification_state({
+        "cleared": True,
+        "updated_at": time.time(),
+        "notifications": [],
+    })
+
+def dismiss_notification(notif_id):
+    state = load_notification_state()
+    remaining = [n for n in state.get("notifications", []) if n.get("id") != notif_id]
+    return save_notification_state({
+        "cleared": len(remaining) == 0,
+        "updated_at": time.time(),
+        "notifications": remaining,
+    })
+
+def add_notification(title, body, badge="QUANTUM", critical=False, time_str="Just now"):
+    state = load_notification_state()
+    items = list(state.get("notifications", []))
+    new_item = {
+        "id": f"notif-{int(time.time() * 1000)}-{len(items)}",
+        "title": str(title),
+        "body": str(body),
+        "time": str(time_str),
+        "badge": str(badge),
+        "critical": bool(critical),
+    }
+    items.insert(0, new_item)
+    return save_notification_state({
+        "cleared": False,
+        "updated_at": time.time(),
+        "notifications": items,
+    })
+
+def reset_default_notifications():
+    return save_notification_state({
+        "cleared": False,
+        "updated_at": time.time(),
+        "notifications": [dict(item) for item in DEFAULT_NOTIFICATIONS],
+    })
+
+class OmniqControlPanel(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_title("OmniQ Control Center")
+        self.set_wmclass("omniq-control-panel", "Omniq-control-panel")
+        self.set_decorated(False)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_keep_above(True)
+
+        screen = self.get_screen()
+        sw = screen.get_width()
+        sh = screen.get_height()
+        panel_w = 320
+        panel_h = min(610, max(480, sh - 60))
+        panel_x = max(8, sw - panel_w - 12)
+        panel_y = 32
+
+        self.set_default_size(panel_w, panel_h)
+        self.move(panel_x, panel_y)
+
+        visual = screen.get_rgba_visual()
+        if visual and screen.is_composited():
+            self.set_visual(visual)
+
+        icon_path = find_icon("control_center_16.png") or find_icon("omniq-logo_16.png")
+        if icon_path:
+            try:
+                self.set_icon_from_file(icon_path)
+            except Exception:
+                pass
+
+        self._load_css()
+        self.connect("key-press-event", self._on_key_press)
+
+        self.wifi_active = True
+        self.bluetooth_active = True
+        self.nightlight_active = False
+        self.dnd_active = False
+        self.tricompute_active = True
+
+        self._build_ui()
+
+    def _load_css(self):
+        css_file = THEME_CSS_PATH if os.path.isfile(THEME_CSS_PATH) else FALLBACK_CSS_PATH
+        provider = Gtk.CssProvider()
+        if os.path.isfile(css_file):
+            try:
+                provider.load_from_path(css_file)
+            except Exception:
+                pass
+
+        panel_css = """
+        window {
+            background-color: transparent;
+        }
+        .control-panel-root {
+            background-color: rgba(13, 11, 24, 0.93);
+            border: 1px solid rgba(138, 79, 255, 0.42);
+            border-radius: 16px;
+            padding: 12px 14px;
+            box-shadow: 0 14px 38px rgba(0, 0, 0, 0.78), 0 0 16px rgba(0, 229, 255, 0.14);
+        }
+        .header-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: #FFFFFF;
+        }
+        .header-sub {
+            font-size: 9px;
+            font-weight: 700;
+            color: #00E5FF;
+        }
+        .close-btn {
+            background: transparent;
+            color: #9E97B8;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 6px;
+            padding: 2px 7px;
+            font-size: 10px;
+            min-height: 18px;
+        }
+        .close-btn:hover {
+            color: #FFFFFF;
+            background-color: #FF3366;
+            border-color: #FF3366;
+        }
+        .tile-button {
+            background-color: rgba(20, 17, 38, 0.85);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 6px 8px;
+            transition: all 150ms ease;
+        }
+        .tile-button:hover {
+            background-color: rgba(26, 21, 48, 0.95);
+            border-color: rgba(0, 229, 255, 0.45);
+        }
+        .tile-button.active {
+            background: linear-gradient(135deg, rgba(138, 79, 255, 0.86), rgba(0, 229, 255, 0.74));
+            border-color: #00E5FF;
+            box-shadow: 0 0 10px rgba(0, 229, 255, 0.35);
+        }
+        .tile-button.active label {
+            color: #FFFFFF;
+        }
+        .tile-title {
+            font-size: 10px;
+            font-weight: 700;
+            color: #FFFFFF;
+        }
+        .tile-sub {
+            font-size: 8.5px;
+            color: #A59CC2;
+        }
+        .slider-card {
+            background-color: rgba(20, 17, 38, 0.78);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 8px 10px;
+        }
+        .slider-label {
+            font-size: 10px;
+            font-weight: 600;
+            color: #EDEAF5;
+        }
+        .slider-val {
+            font-size: 9.5px;
+            font-weight: 700;
+            color: #00E5FF;
+        }
+        scale trough {
+            background-color: rgba(255, 255, 255, 0.10);
+            border-radius: 9999px;
+            min-height: 4px;
+        }
+        scale highlight {
+            background: linear-gradient(90deg, #8A4FFF, #00E5FF);
+            border-radius: 9999px;
+        }
+        scale slider {
+            background-color: #FFFFFF;
+            border: 1.5px solid #00E5FF;
+            border-radius: 50%;
+            min-width: 12px;
+            min-height: 12px;
+            margin: -4px 0;
+        }
+        .notif-card {
+            background-color: rgba(20, 17, 38, 0.78);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            padding: 6px 9px;
+            margin-bottom: 4px;
+        }
+        .notif-card.critical-alert {
+            background-color: rgba(0, 229, 255, 0.08);
+            border-color: rgba(0, 229, 255, 0.38);
+        }
+        .notif-title {
+            font-size: 10px;
+            font-weight: 700;
+            color: #FFFFFF;
+        }
+        .notif-badge-mint {
+            font-size: 8px;
+            font-weight: 700;
+            color: #00FF9D;
+        }
+        .notif-badge-violet {
+            font-size: 8px;
+            font-weight: 700;
+            color: #8A4FFF;
+        }
+        .notif-body {
+            font-size: 9px;
+            color: #B4ABCE;
+        }
+        .notif-time {
+            font-size: 8px;
+            color: #7A7096;
+        }
+        .clear-btn {
+            background-color: rgba(138, 79, 255, 0.24);
+            color: #00E5FF;
+            border: 1px solid rgba(0, 229, 255, 0.38);
+            border-radius: 6px;
+            padding: 2px 8px;
+            font-size: 9px;
+            font-weight: 700;
+            min-height: 18px;
+        }
+        .clear-btn:hover {
+            background-color: rgba(0, 229, 255, 0.30);
+            color: #FFFFFF;
+        }
+        .notif-dismiss-btn {
+            background: transparent;
+            color: #8E82A8;
+            border: none;
+            border-radius: 4px;
+            padding: 0px 4px;
+            font-size: 9px;
+            min-height: 14px;
+        }
+        .notif-dismiss-btn:hover {
+            color: #FF3366;
+            background-color: rgba(255, 51, 102, 0.18);
+        }
+        .notif-empty-lbl {
+            font-size: 9.5px;
+            color: #7A7096;
+            padding: 16px 8px;
+        }
+        .footer-btn {
+            background-color: rgba(20, 17, 38, 0.82);
+            border: 1px solid rgba(255, 255, 255, 0.09);
+            border-radius: 8px;
+            padding: 5px 8px;
+        }
+        .footer-btn:hover {
+            background-color: rgba(26, 21, 48, 0.95);
+            border-color: #00E5FF;
+        }
+        .footer-btn.power:hover {
+            background-color: rgba(255, 51, 102, 0.25);
+            border-color: #FF3366;
+        }
+        .footer-btn-lbl {
+            font-size: 10px;
+            font-weight: 600;
+            color: #EDEAF5;
+        }
+        """
+        extra_provider = Gtk.CssProvider()
+        extra_provider.load_from_data(panel_css.encode("utf-8"))
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            extra_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_USER,
+        )
+
+    def _build_ui(self):
+        root_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9)
+        root_box.get_style_context().add_class("control-panel-root")
+        self.add(root_box)
+
+        hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        logo_icon = find_icon("control_center_16.png") or find_icon("omniq-logo_16.png")
+        if logo_icon:
+            hdr.pack_start(Gtk.Image.new_from_file(logo_icon), False, False, 0)
+
+        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        t_lbl = Gtk.Label(label="OmniQ Control Center")
+        t_lbl.set_xalign(0.0)
+        t_lbl.get_style_context().add_class("header-title")
+        title_box.pack_start(t_lbl, False, False, 0)
+
+        s_lbl = Gtk.Label(label="Quantum Tri-Compute & Cryostat HUD")
+        s_lbl.set_xalign(0.0)
+        s_lbl.get_style_context().add_class("header-sub")
+        title_box.pack_start(s_lbl, False, False, 0)
+        hdr.pack_start(title_box, True, True, 0)
+
+        close_btn = Gtk.Button(label="X")
+        close_btn.get_style_context().add_class("close-btn")
+        close_btn.connect("clicked", lambda _b: self.close())
+        hdr.pack_end(close_btn, False, False, 0)
+        root_box.pack_start(hdr, False, False, 0)
+
+        tile_grid = Gtk.Grid()
+        tile_grid.set_column_spacing(6)
+        tile_grid.set_row_spacing(6)
+        tile_grid.set_column_homogeneous(True)
+
+        self.wifi_btn = self._create_tile(
+            "wifi_16.png", "Wi-Fi", "Connected", active=self.wifi_active, callback=self._toggle_wifi
+        )
+        tile_grid.attach(self.wifi_btn, 0, 0, 1, 1)
+
+        self.bt_btn = self._create_tile(
+            "bluetooth_16.png", "Bluetooth", "Active", active=self.bluetooth_active, callback=self._toggle_bluetooth
+        )
+        tile_grid.attach(self.bt_btn, 1, 0, 1, 1)
+
+        self.nl_btn = self._create_tile(
+            "nightlight_16.png", "Night Light", "Off", active=self.nightlight_active, callback=self._toggle_nightlight
+        )
+        tile_grid.attach(self.nl_btn, 0, 1, 1, 1)
+
+        self.dnd_btn = self._create_tile(
+            "notifications_16.png", "Do Not Disturb", "Normal", active=self.dnd_active, callback=self._toggle_dnd
+        )
+        tile_grid.attach(self.dnd_btn, 1, 1, 1, 1)
+
+        self.synergy_btn = self._create_tile(
+            "qpu_3d_16.png", "Tri-Compute Synergy", "CPU+GPU+QPU", active=self.tricompute_active, callback=self._toggle_synergy
+        )
+        tile_grid.attach(self.synergy_btn, 0, 2, 1, 1)
+
+        self.lock_btn = self._create_tile(
+            "lock_16.png", "Lock Session", "Secure Console", active=False, callback=self._trigger_lock
+        )
+        tile_grid.attach(self.lock_btn, 1, 2, 1, 1)
+        root_box.pack_start(tile_grid, False, False, 0)
+
+        sliders_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+        sliders_box.get_style_context().add_class("slider-card")
+
+        b_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        b_icon = find_icon("nightlight_16.png")
+        if b_icon:
+            b_row.pack_start(Gtk.Image.new_from_file(b_icon), False, False, 0)
+        b_lbl = Gtk.Label(label="Display Brightness")
+        b_lbl.set_xalign(0.0)
+        b_lbl.get_style_context().add_class("slider-label")
+        b_row.pack_start(b_lbl, True, True, 0)
+        self.b_val_lbl = Gtk.Label(label="100%")
+        self.b_val_lbl.get_style_context().add_class("slider-val")
+        b_row.pack_end(self.b_val_lbl, False, False, 0)
+        sliders_box.pack_start(b_row, False, False, 0)
+
+        self.b_slider = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 20, 100, 5)
+        self.b_slider.set_value(100)
+        self.b_slider.set_draw_value(False)
+        self.b_slider.connect("value-changed", self._on_brightness_changed)
+        sliders_box.pack_start(self.b_slider, False, False, 0)
+
+        v_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        v_icon = find_icon("audio_16.png")
+        if v_icon:
+            v_row.pack_start(Gtk.Image.new_from_file(v_icon), False, False, 0)
+        v_lbl = Gtk.Label(label="Audio Volume")
+        v_lbl.set_xalign(0.0)
+        v_lbl.get_style_context().add_class("slider-label")
+        v_row.pack_start(v_lbl, True, True, 0)
+        self.v_val_lbl = Gtk.Label(label="80%")
+        self.v_val_lbl.get_style_context().add_class("slider-val")
+        v_row.pack_end(self.v_val_lbl, False, False, 0)
+        sliders_box.pack_start(v_row, False, False, 0)
+
+        self.v_slider = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 5)
+        self.v_slider.set_value(80)
+        self.v_slider.set_draw_value(False)
+        self.v_slider.connect("value-changed", self._on_volume_changed)
+        sliders_box.pack_start(self.v_slider, False, False, 0)
+        root_box.pack_start(sliders_box, False, False, 0)
+
+        notif_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        n_lbl = Gtk.Label(label="QUANTUM & CRYO ALERT CENTER")
+        n_lbl.set_xalign(0.0)
+        n_lbl.get_style_context().add_class("header-sub")
+        notif_header.pack_start(n_lbl, True, True, 0)
+
+        self.clear_btn = Gtk.Button(label="Clear")
+        self.clear_btn.get_style_context().add_class("clear-btn")
+        self.clear_btn.connect("clicked", self._clear_notifications)
+        notif_header.pack_end(self.clear_btn, False, False, 0)
+        root_box.pack_start(notif_header, False, False, 0)
+
+        notif_scroll = Gtk.ScrolledWindow()
+        notif_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        notif_scroll.set_vexpand(True)
+
+        self.notif_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        notif_scroll.add(self.notif_container)
+        root_box.pack_start(notif_scroll, True, True, 0)
+
+        self._last_notif_updated_at = 0.0
+        self._populate_notifications()
+        self._poll_timer_id = GLib.timeout_add(1000, self._poll_notification_state)
+        self.connect("destroy", self._on_destroy_cleanup)
+
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        footer.pack_start(
+            self._create_action_btn("settings_16.png", "Settings", lambda: self._launch_cmd(["omniq-settings"])),
+            True, True, 0,
+        )
+        footer.pack_start(
+            self._create_action_btn("tasks_16.png", "Tasks", lambda: self._launch_cmd(["omniq-tasks"])),
+            True, True, 0,
+        )
+        footer.pack_start(
+            self._create_action_btn("power_16.png", "Power", lambda: self._launch_cmd(["omniq-power"]), is_power=True),
+            True, True, 0,
+        )
+        root_box.pack_start(footer, False, False, 0)
+
+    def _on_destroy_cleanup(self, *_args):
+        if getattr(self, "_poll_timer_id", None):
+            try:
+                GLib.source_remove(self._poll_timer_id)
+            except Exception:
+                pass
+            self._poll_timer_id = None
+
+    def _create_action_btn(self, icon_name, label_text, callback, is_power=False):
+        btn = Gtk.Button()
+        btn.get_style_context().add_class("footer-btn")
+        if is_power:
+            btn.get_style_context().add_class("power")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_halign(Gtk.Align.CENTER)
+        ic_path = find_icon(icon_name)
+        if ic_path:
+            box.pack_start(Gtk.Image.new_from_file(ic_path), False, False, 0)
+        lbl = Gtk.Label(label=label_text)
+        lbl.set_xalign(0.5)
+        lbl.get_style_context().add_class("footer-btn-lbl")
+        box.pack_start(lbl, False, False, 0)
+        btn.add(box)
+        btn.connect("clicked", lambda _b: callback())
+        return btn
+
+    def _create_tile(self, icon_name, title, subtitle, active=False, callback=None):
+        btn = Gtk.Button()
+        btn.get_style_context().add_class("tile-button")
+        if active:
+            btn.get_style_context().add_class("active")
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=7)
+        box.set_margin_start(2)
+        box.set_margin_end(2)
+        ic_path = find_icon(icon_name)
+        if ic_path:
+            box.pack_start(Gtk.Image.new_from_file(ic_path), False, False, 0)
+
+        t_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        t_lbl = Gtk.Label(label=title)
+        t_lbl.set_xalign(0.0)
+        t_lbl.get_style_context().add_class("tile-title")
+        t_box.pack_start(t_lbl, False, False, 0)
+
+        s_lbl = Gtk.Label(label=subtitle)
+        s_lbl.set_xalign(0.0)
+        s_lbl.get_style_context().add_class("tile-sub")
+        t_box.pack_start(s_lbl, False, False, 0)
+
+        box.pack_start(t_box, True, True, 0)
+        btn.add(box)
+        btn._sub_lbl = s_lbl
+        if callback:
+            btn.connect("clicked", lambda b: callback(b))
+        return btn
+
+    def _toggle_tile_state(self, btn, is_active, on_text, off_text):
+        if is_active:
+            btn.get_style_context().add_class("active")
+            btn._sub_lbl.set_text(on_text)
+        else:
+            btn.get_style_context().remove_class("active")
+            btn._sub_lbl.set_text(off_text)
+
+    def _toggle_wifi(self, _btn):
+        self.wifi_active = not self.wifi_active
+        self._toggle_tile_state(self.wifi_btn, self.wifi_active, "Connected", "Disabled")
+        if shutil.which("nmcli"):
+            try:
+                subprocess.Popen(
+                    ["nmcli", "radio", "wifi", "on" if self.wifi_active else "off"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+    def _toggle_bluetooth(self, _btn):
+        self.bluetooth_active = not self.bluetooth_active
+        self._toggle_tile_state(self.bt_btn, self.bluetooth_active, "Active", "Disabled")
+        if shutil.which("rfkill"):
+            try:
+                subprocess.Popen(
+                    ["rfkill", "unblock" if self.bluetooth_active else "block", "bluetooth"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+    def _toggle_nightlight(self, _btn):
+        self.nightlight_active = not self.nightlight_active
+        self._toggle_tile_state(self.nl_btn, self.nightlight_active, "Warm 3700K", "Off")
+        if shutil.which("redshift"):
+            try:
+                cmd = ["redshift", "-O", "3700K"] if self.nightlight_active else ["redshift", "-x"]
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+    def _toggle_dnd(self, _btn):
+        self.dnd_active = not self.dnd_active
+        self._toggle_tile_state(self.dnd_btn, self.dnd_active, "Silence Non-Cryo", "Normal")
+
+    def _toggle_synergy(self, _btn):
+        self.tricompute_active = not self.tricompute_active
+        self._toggle_tile_state(self.synergy_btn, self.tricompute_active, "CPU+GPU+QPU", "Classical Eco")
+
+    def _trigger_lock(self, _btn):
+        self.close()
+        try:
+            subprocess.Popen([find_bin("omniq-screensaver"), "--lock"], start_new_session=True)
+        except Exception:
+            pass
+
+    def _on_brightness_changed(self, scale):
+        val = int(scale.get_value())
+        self.b_val_lbl.set_text(f"{val}%")
+        if shutil.which("xrandr"):
+            try:
+                subprocess.Popen(
+                    ["xrandr", "--output", "default", "--brightness", f"{val / 100.0:.2f}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+    def _on_volume_changed(self, scale):
+        val = int(scale.get_value())
+        self.v_val_lbl.set_text(f"{val}%")
+        if shutil.which("amixer"):
+            try:
+                subprocess.Popen(
+                    ["amixer", "sset", "Master", f"{val}%"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+
+    def _populate_notifications(self):
+        for ch in list(self.notif_container.get_children()):
+            self.notif_container.remove(ch)
+            ch.destroy()
+
+        state = load_notification_state()
+        self._last_notif_updated_at = float(state.get("updated_at", 0.0))
+        alerts = state.get("notifications", [])
+
+        if not alerts:
+            empty_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            empty_box.get_style_context().add_class("notif-card")
+            empty_lbl = Gtk.Label(label="No active quantum or cryostat alerts")
+            empty_lbl.set_xalign(0.5)
+            empty_lbl.get_style_context().add_class("notif-empty-lbl")
+            empty_box.pack_start(empty_lbl, True, True, 0)
+            self.notif_container.pack_start(empty_box, False, False, 0)
+            self.notif_container.show_all()
+            return
+
+        for idx, a in enumerate(alerts):
+            notif_id = a.get("id", f"notif-{idx}")
+            is_crit = bool(a.get("critical") or a.get("fda"))
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            card.get_style_context().add_class("notif-card")
+            if is_crit:
+                card.get_style_context().add_class("critical-alert")
+
+            h_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            badge_lbl = Gtk.Label(label=f"[{a.get('badge', 'INFO')}]")
+            badge_lbl.set_xalign(0.0)
+            badge_lbl.get_style_context().add_class("notif-badge-mint" if is_crit else "notif-badge-violet")
+            h_box.pack_start(badge_lbl, False, False, 0)
+
+            t_lbl = Gtk.Label(label=a.get("title", "System Alert"))
+            t_lbl.set_xalign(0.0)
+            t_lbl.get_style_context().add_class("notif-title")
+            h_box.pack_start(t_lbl, True, True, 0)
+
+            dismiss_btn = Gtk.Button(label="x")
+            dismiss_btn.get_style_context().add_class("notif-dismiss-btn")
+            dismiss_btn.connect("clicked", lambda _b, nid=notif_id: self._dismiss_single_notification(nid))
+            h_box.pack_end(dismiss_btn, False, False, 0)
+
+            time_lbl = Gtk.Label(label=a.get("time", "Just now"))
+            time_lbl.set_xalign(1.0)
+            time_lbl.get_style_context().add_class("notif-time")
+            h_box.pack_end(time_lbl, False, False, 0)
+            card.pack_start(h_box, False, False, 0)
+
+            b_lbl = Gtk.Label(label=a.get("body", ""))
+            b_lbl.set_xalign(0.0)
+            b_lbl.set_line_wrap(True)
+            b_lbl.get_style_context().add_class("notif-body")
+            card.pack_start(b_lbl, False, False, 0)
+
+            self.notif_container.pack_start(card, False, False, 0)
+
+        self.notif_container.show_all()
+
+    def _dismiss_single_notification(self, notif_id):
+        dismiss_notification(notif_id)
+        self._populate_notifications()
+
+    def _clear_notifications(self, _btn=None):
+        clear_all_notifications()
+        self._populate_notifications()
+
+    def _poll_notification_state(self):
+        state = load_notification_state()
+        ts = float(state.get("updated_at", 0.0))
+        if abs(ts - self._last_notif_updated_at) > 1e-6:
+            self._populate_notifications()
+        return True
+
+    def _launch_cmd(self, cmd):
+        self.close()
+        if cmd:
+            resolved = [find_bin(cmd[0])] + list(cmd[1:])
+            try:
+                subprocess.Popen(resolved, start_new_session=True)
+            except Exception:
+                pass
+
+    def _on_key_press(self, _widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
+        return False
+
+def _enforce_single_instance():
+    my_pid = os.getpid()
+    if os.path.isfile(PID_FILE_PATH):
+        try:
+            with open(PID_FILE_PATH, "r", encoding="utf-8") as f:
+                old_pid = int(f.read().strip())
+            if old_pid != my_pid and os.path.exists(f"/proc/{old_pid}/cmdline"):
+                with open(f"/proc/{old_pid}/cmdline", "rb") as cf:
+                    cmd = cf.read().decode("utf-8", "ignore")
+                if "omniq-control-panel" in cmd:
+                    os.kill(old_pid, signal.SIGTERM)
+        except Exception:
+            pass
+    try:
+        with open(PID_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write(str(my_pid))
+    except Exception:
+        pass
+
+def main():
+    GLib.set_prgname("omniq-control-panel")
+    if "--test" in sys.argv:
+        state = reset_default_notifications()
+        assert len(state["notifications"]) >= 4
+        assert find_icon("control_center_16.png") is not None
+        print("[+] omniq-control-panel headless self-test passed.")
+        return 0
+    if "--clear" in sys.argv or "--clear-notifications" in sys.argv:
+        print(json.dumps(clear_all_notifications()))
+        return 0
+    if "--reset-notifications" in sys.argv:
+        print(json.dumps(reset_default_notifications()))
+        return 0
+    if "--list-notifications" in sys.argv or "--json" in sys.argv:
+        print(json.dumps(load_notification_state()))
+        return 0
+    if "--add-notification" in sys.argv:
+        idx = sys.argv.index("--add-notification")
+        title = sys.argv[idx + 1] if len(sys.argv) > idx + 1 else "Quantum Alert"
+        body = sys.argv[idx + 2] if len(sys.argv) > idx + 2 else "Cryostat & QPU telemetry update."
+        print(json.dumps(add_notification(title, body)))
+        return 0
+
+    _enforce_single_instance()
+    GLib.set_application_name("OmniQ Control Center")
+    win = OmniqControlPanel()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

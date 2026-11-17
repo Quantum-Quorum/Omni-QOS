@@ -1,0 +1,929 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import io
+import json
+import signal
+import shutil
+import subprocess
+
+BG_OBSIDIAN   = "#0D0B18"
+BG_SURFACE    = "#141126"
+BG_DOCK       = "#141126"
+BG_ELEVATED   = "#1A1530"
+C_CYAN        = "#00E5FF"
+C_VIOLET      = "#8A4FFF"
+C_MINT        = "#00FF9D"
+C_CRIMSON     = "#FF3366"
+C_LILAC       = "#D8CEFF"
+C_WHITE       = "#FFFFFF"
+
+HAS_PIL = False
+try:
+    from PIL import Image
+    HAS_PIL = True
+except Exception:
+    HAS_PIL = False
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+ICON_DIRS = [
+    "/usr/share/omniq/icons",
+    "/etc/omniq/icons",
+    os.path.join(REPO_ROOT, "etc/omniq/icons"),
+    "/usr/share/omniq/icons/48x48",
+    "/etc/omniq/icons/48x48",
+    os.path.join(REPO_ROOT, "etc/omniq/icons/48x48"),
+    "/usr/share/omniq/icons/16x16",
+    "/etc/omniq/icons/16x16",
+    os.path.join(REPO_ROOT, "etc/omniq/icons/16x16"),
+]
+
+DESKTOP_SHORTCUTS_SPEC = [
+    ("home_48.png",            "Home",             "/root",                     ["omniq-files", "/root"]),
+    ("drive_48.png",           "File System",      "/",                         ["omniq-files", "/"]),
+    ("circuits_folder_48.png", "Quantum Circuits", "/root/circuits",            ["omniq-files", "/root/circuits"]),
+    ("hilbert_48.png",         "Hilbert Explorer", "/usr/local/bin/omniq-hilbert-space", ["omniq-hilbert-space"]),
+    ("cryo_lab_48.png",        "Cryo Dilution Lab","/usr/local/bin/omniq-cryo-lab",      ["omniq-cryo-lab"]),
+    ("trash_48.png",           "Trash",            "/root/.local/share/Trash",  ["omniq-files", "/root/.local/share/Trash"]),
+]
+
+DOCK_ITEMS_SPEC = [
+    {
+        "id": "spotlight",
+        "icon": "spotlight_48.png",
+        "label": "Search",
+        "cmd": ["omniq-spotlight"],
+        "wm_classes": ["omniq-spotlight", "Omniq-spotlight"],
+        "actions": [
+            ("Search Apps & QASM Circuits (Alt+Space)", ["omniq-spotlight"]),
+            ("Open Applications Catalog (F1)", ["omniq-app-launcher"]),
+        ],
+    },
+    {
+        "id": "terminal",
+        "icon": "terminal_48.png",
+        "label": "Terminal",
+        "cmd": ["omniq-terminal"],
+        "wm_classes": ["terminator", "Terminator", "xterm", "XTerm"],
+        "actions": [
+            ("New Terminal Window", ["omniq-terminal"]),
+            ("Live QPU-SMI HUD", ["omniq-terminal", "-e", "qpu-smi --watch"]),
+            ("Root Diagnostic Shell", ["omniq-terminal", "-e", "/bin/bash"]),
+        ],
+    },
+    {
+        "id": "circuit_maker",
+        "icon": "circuit_maker_48.png",
+        "label": "Circuit Maker",
+        "cmd": ["omniq-circuit-maker"],
+        "wm_classes": ["omniq-circuit-maker", "Omniq-circuit-maker"],
+        "actions": [
+            ("New Quantum Circuit Studio", ["omniq-circuit-maker"]),
+            ("Browse /root/circuits", ["omniq-files", "/root/circuits"]),
+        ],
+    },
+    {
+        "id": "hilbert",
+        "icon": "hilbert_48.png",
+        "label": "Hilbert Space",
+        "cmd": ["omniq-hilbert-space"],
+        "wm_classes": ["omniq-hilbert-space", "Omniq-hilbert-space"],
+        "actions": [
+            ("3D Bloch & Hilbert Explorer", ["omniq-hilbert-space"]),
+            ("Quantum Step Debugger", ["omniq-debugger"]),
+        ],
+    },
+    {
+        "id": "cockpit",
+        "icon": "cockpit_48.png",
+        "label": "Cockpit",
+        "cmd": ["omniq-gui"],
+        "wm_classes": ["omniq-gui", "Omniq-gui"],
+        "actions": [
+            ("OmniQ Quantum Mission Cockpit", ["omniq-gui"]),
+            ("QPU Daemon Status", ["omniq-terminal", "-e", "omniq-ctl status; exec bash"]),
+        ],
+    },
+    {
+        "id": "cryo_lab",
+        "icon": "cryo_lab_48.png",
+        "label": "Cryo Lab",
+        "cmd": ["omniq-cryo-lab"],
+        "wm_classes": ["omniq-cryo-lab", "Omniq-cryo-lab"],
+        "actions": [
+            ("Cryogenic Dilution Lab & SCPI/Modbus Console (F10)", ["omniq-cryo-lab"]),
+        ],
+    },
+    {
+        "id": "qec",
+        "icon": "qec_48.png",
+        "label": "QEC Decoder",
+        "cmd": ["omniq-qec"],
+        "wm_classes": ["omniq-qec", "Omniq-qec"],
+        "actions": [
+            ("Surface Code MWPM Decoder", ["omniq-qec"]),
+        ],
+    },
+    {
+        "id": "vqe_chem",
+        "icon": "vqe_chem_48.png",
+        "label": "VQE Chem",
+        "cmd": ["omniq-vqe-chem"],
+        "wm_classes": ["omniq-vqe-chem", "Omniq-vqe-chem"],
+        "actions": [
+            ("VQE Molecular Chemistry Solver", ["omniq-vqe-chem"]),
+        ],
+    },
+    {
+        "id": "qpu_3d",
+        "icon": "qpu_3d_48.png",
+        "label": "3D QPU",
+        "cmd": ["omniq-qpu-3d"],
+        "wm_classes": ["omniq-qpu-3d", "Omniq-qpu-3d"],
+        "actions": [
+            ("3D Cryostat & Heavy-Hex QPU", ["omniq-qpu-3d"]),
+        ],
+    },
+    {
+        "id": "files",
+        "icon": "files_48.png",
+        "label": "Files",
+        "cmd": ["omniq-files", "/root/circuits"],
+        "wm_classes": ["omniq-files", "Omniq-files"],
+        "actions": [
+            ("Open Quantum Circuits (/root/circuits)", ["omniq-files", "/root/circuits"]),
+            ("Open Home (/root)", ["omniq-files", "/root"]),
+            ("Open Root Filesystem (/)", ["omniq-files", "/"]),
+        ],
+    },
+    {
+        "id": "editor",
+        "icon": "editor_48.png",
+        "label": "Editor",
+        "cmd": ["omniq-edit"],
+        "wm_classes": ["omniq-edit", "Omniq-edit"],
+        "actions": [
+            ("New OpenQASM / Python Editor", ["omniq-edit"]),
+        ],
+    },
+    {
+        "id": "tasks",
+        "icon": "tasks_48.png",
+        "label": "Tasks",
+        "cmd": ["omniq-tasks"],
+        "wm_classes": ["omniq-tasks", "Omniq-tasks"],
+        "actions": [
+            ("Real-Time Process & SCHED_FIFO Monitor", ["omniq-tasks"]),
+        ],
+    },
+    {
+        "id": "settings",
+        "icon": "settings_48.png",
+        "label": "Settings",
+        "cmd": ["omniq-settings"],
+        "wm_classes": ["omniq-settings", "Omniq-settings"],
+        "actions": [
+            ("System Settings", ["omniq-settings"]),
+            ("Quick Control Center", ["omniq-control-panel"]),
+            ("Change Desktop Wallpaper", ["omniq-wallpaper", "--gui"]),
+        ],
+    },
+    {
+        "id": "pqc_audit",
+        "icon": "pqc_audit_48.png",
+        "label": "PQC Audit",
+        "cmd": ["omniq-pqc-audit"],
+        "wm_classes": ["omniq-pqc-audit", "Omniq-pqc-audit"],
+        "actions": [
+            ("NIST Post-Quantum & SOC 2 Auditor", ["omniq-pqc-audit"]),
+            ("Network & RFSoC Ports Console", ["omniq-ports"]),
+        ],
+    },
+]
+
+def find_icon(name):
+    for d in ICON_DIRS:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+def find_bin(cmd_name):
+    repo_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), cmd_name)
+    for c in [
+        f"/usr/local/bin/{cmd_name}",
+        f"/usr/bin/{cmd_name}",
+        f"/bin/{cmd_name}",
+        repo_bin,
+    ]:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return shutil.which(cmd_name) or cmd_name
+
+def _tool_env():
+    env = dict(os.environ)
+    repo_lib = os.path.join(REPO_ROOT, "lib")
+    cur_ld = env.get("LD_LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = f"{repo_lib}:/usr/local/lib:/opt/omniq/lib:{cur_ld}".strip(":")
+    return env
+
+def resolve_wallpaper_path(image_path):
+    if not image_path:
+        return None
+    expanded = os.path.abspath(os.path.expanduser(image_path))
+    if os.path.isfile(expanded):
+        return os.path.realpath(expanded)
+
+    search_dirs = [
+        "/usr/share/omniq",
+        "/etc/omniq",
+        os.path.join(REPO_ROOT, "etc/omniq"),
+        os.path.expanduser("~/Pictures/Wallpapers"),
+        os.path.expanduser("~/Pictures"),
+    ]
+    for d in search_dirs:
+        cand = os.path.join(d, image_path)
+        if os.path.isfile(cand):
+            return os.path.realpath(cand)
+    return None
+
+def get_running_windows():
+    windows = []
+    wmctrl = find_bin("wmctrl")
+    if wmctrl:
+        try:
+            res = subprocess.run(
+                [wmctrl, "-x", "-l"],
+                capture_output=True,
+                text=True,
+                timeout=1,
+                env=_tool_env(),
+            )
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    parts = line.split(None, 4)
+                    if len(parts) >= 3:
+                        wid = parts[0]
+                        wclass = parts[2].lower()
+                        wtitle = parts[4] if len(parts) >= 5 else ""
+                        windows.append((wid, wclass, wtitle))
+        except Exception:
+            pass
+    return windows
+
+def resolve_command(cmd_args):
+    if not cmd_args:
+        return cmd_args
+    resolved = list(cmd_args)
+    base = os.path.basename(resolved[0])
+    bin_path = find_bin(base)
+    is_exec = (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)) or (
+        shutil.which(bin_path) is not None
+    )
+    if not is_exec and base == "omniq-terminal":
+        for term in ["terminator", "xterm", "lxterminal"]:
+            fb = shutil.which(term)
+            if fb:
+                resolved[0] = fb
+                return resolved
+    resolved[0] = bin_path
+    return resolved
+
+def is_app_running(cmd_name, wm_classes=None):
+    if wm_classes:
+        for _, wclass, _ in get_running_windows():
+            for c in wm_classes:
+                if c.lower() in wclass:
+                    return True
+    try:
+        targets = [os.path.basename(cmd_name).lower()]
+        if wm_classes:
+            targets.extend([c.lower() for c in wm_classes])
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    cmd = f.read().replace(b"\x00", b" ").decode("utf-8", "ignore").lower()
+                for target in targets:
+                    if target in cmd and "omniq-desktop-backdrop" not in cmd:
+                        return True
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return False
+
+def raise_app_window(wm_classes):
+    wmctrl = find_bin("wmctrl")
+    if wmctrl and wm_classes:
+        for c in wm_classes:
+            try:
+                res = subprocess.run(
+                    [wmctrl, "-x", "-a", c],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1,
+                    env=_tool_env(),
+                )
+                if res.returncode == 0:
+                    return True
+            except Exception:
+                pass
+    xdotool = find_bin("xdotool")
+    if xdotool and wm_classes:
+        for c in wm_classes:
+            try:
+                res = subprocess.run(
+                    [xdotool, "search", "--class", c, "windowactivate"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1,
+                    env=_tool_env(),
+                )
+                if res.returncode == 0:
+                    return True
+            except Exception:
+                pass
+    return False
+
+def close_app_window(wm_classes, cmd_name=None):
+    closed = False
+    wmctrl = find_bin("wmctrl")
+    if wmctrl and wm_classes:
+        for c in wm_classes:
+            try:
+                res = subprocess.run(
+                    [wmctrl, "-x", "-c", c],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1,
+                    env=_tool_env(),
+                )
+                if res.returncode == 0:
+                    closed = True
+            except Exception:
+                pass
+    if not closed and cmd_name:
+        try:
+            subprocess.run(
+                ["pkill", "-f", os.path.basename(cmd_name)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+        except Exception:
+            pass
+
+def run_desktop_backdrop():
+    import tkinter as tk
+    from tkinter import messagebox
+
+    class OmniqDesktopBackdrop(tk.Tk):
+        def __init__(self):
+            super().__init__(className="OmniqDesktop")
+            self.title("OmniQ Desktop Workspace")
+            self._after_ids = set()
+            self._closing = False
+
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            panel_h = 26
+
+            try:
+                self.attributes("-type", "desktop")
+            except Exception:
+                pass
+
+            self.geometry(f"{sw}x{sh - panel_h}+0+{panel_h}")
+            self.configure(bg=BG_OBSIDIAN)
+            self.option_add("*Background", BG_OBSIDIAN)
+            self.option_add("*Foreground", C_WHITE)
+            self.option_add("*selectBackground", C_VIOLET)
+            self.option_add("*selectForeground", C_WHITE)
+
+            self.update_idletasks()
+            if shutil.which("xprop"):
+                try:
+                    wid = hex(self.winfo_id())
+                    subprocess.Popen(
+                        [
+                            "xprop", "-id", wid,
+                            "-f", "_NET_WM_WINDOW_TYPE", "32a",
+                            "-set", "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DESKTOP",
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+
+            self.lower()
+
+            self.canvas_w = sw
+            self.canvas_h = sh - panel_h
+            self.last_wp_mtime = 0.0
+
+            self.canvas = tk.Canvas(
+                self,
+                width=self.canvas_w,
+                height=self.canvas_h,
+                bg=BG_OBSIDIAN,
+                highlightthickness=0,
+            )
+            self.canvas.pack(fill="both", expand=True)
+
+            self.photo_images = {}
+            self.wallpaper_img = None
+            self.dock_dot_ids = {}
+            self.dock_items_config = list(DOCK_ITEMS_SPEC)
+
+            self.draw_backdrop(self.canvas_w, self.canvas_h)
+            self.create_context_menu(tk)
+            self.create_floating_dock(self.canvas_w, self.canvas_h, tk)
+            self.create_desktop_shortcuts(self.canvas_w, self.canvas_h, tk, messagebox)
+
+            self.canvas.bind("<Button-1>", lambda e: self.lower())
+            self.canvas.bind("<Button-2>", self.show_context_menu)
+            self.canvas.bind("<Button-3>", self.show_context_menu)
+            self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+            try:
+                signal.signal(signal.SIGUSR1, lambda s, f: self.after_idle(self.reload_wallpaper))
+                signal.signal(signal.SIGTERM, lambda s, f: self.after_idle(self.destroy))
+            except Exception:
+                pass
+
+            self._schedule_after(1000, self.check_wallpaper_update)
+            self._schedule_after(1500, self.update_running_indicators)
+
+        def _schedule_after(self, delay_ms, callback):
+            if self._closing:
+                return None
+
+            def _wrapped():
+                self._after_ids.discard(job_id)
+                if not self._closing:
+                    callback()
+
+            job_id = self.after(delay_ms, _wrapped)
+            self._after_ids.add(job_id)
+            return job_id
+
+        def cancel_all_timers(self):
+            self._closing = True
+            for job_id in list(self._after_ids):
+                try:
+                    self.after_cancel(job_id)
+                except Exception:
+                    pass
+            self._after_ids.clear()
+
+        def destroy(self):
+            self.cancel_all_timers()
+            super().destroy()
+
+        def get_wallpaper_config(self):
+            candidates = [
+                os.path.expanduser("~/.config/omniq/wallpaper.conf"),
+                "/tmp/omniq_wallpaper.conf",
+                "/etc/omniq/wallpaper.conf",
+                os.path.join(REPO_ROOT, "etc/omniq/wallpaper.conf"),
+            ]
+            best_cfg = None
+            best_time = -1.0
+            for c in candidates:
+                if os.path.isfile(c):
+                    try:
+                        with open(c, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        if isinstance(data, dict):
+                            ts = float(data.get("updated_at", 0) or os.path.getmtime(c))
+                            if ts > best_time:
+                                best_time = ts
+                                best_cfg = data
+                    except Exception:
+                        pass
+            return best_cfg, (best_time if best_cfg else 0.0)
+
+        def check_wallpaper_update(self):
+            _, mtime = self.get_wallpaper_config()
+            if abs(mtime - self.last_wp_mtime) > 1e-6:
+                self.last_wp_mtime = mtime
+                self.reload_wallpaper()
+            self._schedule_after(1000, self.check_wallpaper_update)
+
+        def reload_wallpaper(self):
+            if not self._closing:
+                self.draw_backdrop(self.canvas_w, self.canvas_h)
+
+        def draw_backdrop(self, w, h):
+            import tkinter as tk
+            self.canvas.delete("wallpaper")
+            cfg, mtime = self.get_wallpaper_config()
+            if mtime > 0:
+                self.last_wp_mtime = mtime
+
+            mode = cfg.get("mode", "image") if cfg else "image"
+            if mode == "color":
+                color = cfg.get("color", BG_OBSIDIAN)
+                self.canvas.create_rectangle(0, 0, w, h, fill=color, outline="", tags=("wallpaper",))
+                for x in range(0, w, 80):
+                    self.canvas.create_line(x, 0, x, h, fill="#141126", width=1, tags=("wallpaper",))
+                for y in range(0, h, 80):
+                    self.canvas.create_line(0, y, w, y, fill="#141126", width=1, tags=("wallpaper",))
+                self.canvas.tag_lower("wallpaper")
+                return
+
+            raw_path = cfg.get("path", "") if cfg else ""
+            wp_path = resolve_wallpaper_path(raw_path)
+            if not wp_path:
+                for wp_name in [
+                    "wallpaper.png",
+                    "wallpaper_cryo.png",
+                    "wallpaper_hilbert.png",
+                    "wallpaper_heavyhex.png",
+                    "wallpaper_surfacecode.png",
+                    "wallpaper_obsidian.png",
+                ]:
+                    cand = resolve_wallpaper_path(wp_name)
+                    if cand:
+                        wp_path = cand
+                        break
+
+            loaded = False
+            if wp_path and os.path.isfile(wp_path):
+                try:
+                    if HAS_PIL:
+                        pil_img = Image.open(wp_path).convert("RGB")
+                        pil_img = pil_img.resize((w, h), Image.Resampling.LANCZOS)
+                        bio = io.BytesIO()
+                        pil_img.save(bio, format="PPM")
+                        self.wallpaper_img = tk.PhotoImage(data=bio.getvalue())
+                    else:
+                        self.wallpaper_img = tk.PhotoImage(file=wp_path)
+                    self.canvas.create_image(0, 0, image=self.wallpaper_img, anchor="nw", tags=("wallpaper",))
+                    loaded = True
+                except Exception as e:
+                    print("Wallpaper load fallback:", e)
+
+            if not loaded:
+                self.canvas.create_rectangle(0, 0, w, h, fill=BG_OBSIDIAN, outline="", tags=("wallpaper",))
+                for x in range(0, w, 80):
+                    self.canvas.create_line(x, 0, x, h, fill="#141126", width=1, tags=("wallpaper",))
+                for y in range(0, h, 80):
+                    self.canvas.create_line(0, y, w, y, fill="#141126", width=1, tags=("wallpaper",))
+                cx, cy = w // 2, h // 2 - 30
+                self.canvas.create_oval(cx - 160, cy - 160, cx + 160, cy + 160, outline=BG_ELEVATED, width=2, tags=("wallpaper",))
+                self.canvas.create_oval(cx - 90, cy - 90, cx + 90, cy + 90, outline=C_VIOLET, width=2, tags=("wallpaper",))
+                self.canvas.create_text(cx, cy + 115, text="OMNIQ-OS", fill=C_WHITE, font=("DejaVu Sans", 30, "bold"), tags=("wallpaper",))
+                self.canvas.create_text(cx, cy + 150, text="Real-Time Quantum Linux (PREEMPT_RT)", fill=C_CYAN, font=("DejaVu Sans", 13, "bold"), tags=("wallpaper",))
+
+            self.canvas.tag_lower("wallpaper")
+
+        def _load_photo(self, icon_name, tk):
+            path = find_icon(icon_name)
+            if path and os.path.exists(path):
+                if path not in self.photo_images:
+                    self.photo_images[path] = tk.PhotoImage(file=path)
+                return self.photo_images[path]
+            return None
+
+        def create_context_menu(self, tk):
+            self.menu = tk.Menu(
+                self,
+                tearoff=0,
+                bg=BG_SURFACE,
+                fg=C_WHITE,
+                activebackground=C_VIOLET,
+                activeforeground=C_WHITE,
+                font=("DejaVu Sans", 9),
+            )
+
+            def add_item(icon_base, label, cmd_fn):
+                img = self._load_photo(f"{icon_base}_16.png", tk) or self._load_photo(f"{icon_base}.png", tk)
+                if img:
+                    self.menu.add_command(label=f"  {label}", image=img, compound="left", command=cmd_fn)
+                else:
+                    self.menu.add_command(label=f"  {label}", command=cmd_fn)
+
+            add_item("wallpaper", "Change Desktop Wallpaper...", lambda: self._run_cmd(["omniq-wallpaper", "--gui"]))
+            add_item("wallpaper", "Next Quantum Wallpaper (Cycle)", lambda: self._run_cmd(["omniq-wallpaper", "--next"]))
+            self.menu.add_separator()
+
+            entries = [
+                ("spotlight",       "Spotlight Search (Alt+Space)",   ["omniq-spotlight"]),
+                ("terminal",        "Open Power Terminal",            ["omniq-terminal"]),
+                ("circuit_maker",   "Quantum Circuit Maker",          ["omniq-circuit-maker"]),
+                ("hilbert",         "Hilbert Space Explorer",         ["omniq-hilbert-space"]),
+                ("cockpit",         "Quantum Mission Cockpit",        ["omniq-gui"]),
+                ("qec",             "Surface Code QEC Decoder",       ["omniq-qec"]),
+                ("vqe_chem",        "VQE Molecular Chemistry",        ["omniq-vqe-chem"]),
+                ("qpu_3d",          "3D Cryogenic QPU Viewer",        ["omniq-qpu-3d"]),
+                ("circuits_folder", "Browse Quantum Circuits",        ["omniq-files", "/root/circuits"]),
+                ("editor",          "OpenQASM & Code Editor",         ["omniq-edit"]),
+                ("tasks",           "Real-Time Task Monitor",         ["omniq-tasks"]),
+                ("settings",        "System Settings",                ["omniq-settings"]),
+                ("pqc_audit",       "PQC & SOC 2 Security Audit",     ["omniq-pqc-audit"]),
+                ("screenshot",      "Screen Capture Utility",         ["omniq-screenshot"]),
+            ]
+            for ic, lbl, cmd in entries:
+                add_item(ic, lbl, lambda c=cmd: self._run_cmd(c))
+
+            self.menu.add_separator()
+            add_item("settings", "Refresh Desktop", self.refresh_desktop)
+            add_item("lock", "Lock Quantum Session", lambda: self._run_cmd(["omniq-screensaver", "--lock"]))
+            add_item("power", "Power Off System", lambda: self._run_cmd(["omniq-power"]))
+
+        def show_context_menu(self, event):
+            if hasattr(self, "dock_bounds") and self.dock_items_config:
+                dx, dy, dw, dh, dpad, iw = self.dock_bounds
+                if dx <= event.x <= dx + dw and dy <= event.y <= dy + dh:
+                    idx = int((event.x - (dx + dpad)) // iw)
+                    if 0 <= idx < len(self.dock_items_config):
+                        self.show_dock_context_menu(event, self.dock_items_config[idx])
+                        return
+
+            total_items = (self.menu.index("end") + 1) if self.menu.index("end") is not None else 16
+            approx_h = total_items * 24 + 12
+            sh = self.winfo_screenheight()
+            sw = self.winfo_screenwidth()
+            popup_y = event.y_root
+            if popup_y + approx_h > sh - 40:
+                popup_y = max(36, event.y_root - approx_h - 8)
+            popup_x = max(10, min(event.x_root, sw - 250))
+            try:
+                self.menu.tk_popup(popup_x, popup_y)
+            except Exception:
+                pass
+
+        def create_desktop_shortcuts(self, sw, sh, tk, messagebox):
+            start_x = 18
+            start_y = 18
+            spacing = 78
+            for i, (icon_file, label, target_path, cmd_args) in enumerate(DESKTOP_SHORTCUTS_SPEC):
+                iy = start_y + i * spacing
+                self._render_shortcut(start_x, iy, icon_file, label, target_path, cmd_args, tk, messagebox)
+
+        def _render_shortcut(self, x, y, icon_file, label, target_path, cmd_args, tk, messagebox):
+            tag = f"desktop_{label.lower().replace(' ', '_')}"
+            bg_id = self.canvas.create_rectangle(x, y, x + 76, y + 66, fill="", outline="", tags=(tag,))
+
+            pimg = self._load_photo(icon_file, tk) or self._load_photo(icon_file.replace("_48", ""), tk)
+            if pimg:
+                self.canvas.create_image(x + 38, y + 26, image=pimg, tags=(tag,))
+            else:
+                self.canvas.create_oval(x + 20, y + 8, x + 56, y + 44, fill=C_VIOLET, outline=C_CYAN, tags=(tag,))
+
+            lbl_id = self.canvas.create_text(
+                x + 38, y + 55, text=label, fill=C_LILAC, font=("DejaVu Sans", 8, "bold"), tags=(tag,)
+            )
+
+            self.canvas.tag_bind(tag, "<Enter>", lambda e: (
+                self.canvas.itemconfig(bg_id, fill=BG_ELEVATED, outline=C_VIOLET),
+                self.canvas.itemconfig(lbl_id, fill=C_CYAN),
+            ))
+            self.canvas.tag_bind(tag, "<Leave>", lambda e: (
+                self.canvas.itemconfig(bg_id, fill="", outline=""),
+                self.canvas.itemconfig(lbl_id, fill=C_LILAC),
+            ))
+            self.canvas.tag_bind(tag, "<Button-1>", lambda e: self._run_cmd(cmd_args))
+            self.canvas.tag_bind(tag, "<Double-Button-1>", lambda e: self._run_cmd(cmd_args))
+            self.canvas.tag_bind(
+                tag, "<Button-3>",
+                lambda e: self._show_shortcut_menu(e, label, target_path, cmd_args, tk, messagebox),
+            )
+
+        def _show_shortcut_menu(self, event, label, target_path, cmd_args, tk, messagebox):
+            menu = tk.Menu(
+                self, tearoff=0, bg=BG_SURFACE, fg=C_WHITE,
+                activebackground=C_VIOLET, activeforeground=C_WHITE, font=("DejaVu Sans", 9),
+            )
+            menu.add_command(label=f"  {label}", state="disabled")
+            menu.add_separator()
+            menu.add_command(label="  Open", command=lambda: self._run_cmd(cmd_args))
+            if os.path.isdir(target_path) and label.lower() != "trash":
+                menu.add_command(
+                    label="  Open Terminal Here",
+                    command=lambda: self._run_cmd(["omniq-terminal", "--working-directory", target_path]),
+                )
+            if label.lower() == "trash":
+                menu.add_separator()
+                menu.add_command(label="  Empty Trash...", command=lambda: self._empty_trash(messagebox))
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            except Exception:
+                pass
+
+        def _empty_trash(self, messagebox):
+            trash_dir = os.path.expanduser("~/.local/share/Trash/files")
+            if not os.path.exists(trash_dir) or not os.listdir(trash_dir):
+                messagebox.showinfo("Trash", "Quantum Workstation Trash is already empty.")
+                return
+            if messagebox.askyesno("Empty Trash", "Permanently delete all items in Trash?"):
+                for item in os.listdir(trash_dir):
+                    p = os.path.join(trash_dir, item)
+                    try:
+                        if os.path.isdir(p):
+                            shutil.rmtree(p)
+                        else:
+                            os.remove(p)
+                    except Exception:
+                        pass
+
+        def create_floating_dock(self, sw, sh, tk):
+            n_items = len(self.dock_items_config)
+            item_w = min(68, max(48, (sw - 48) // n_items))
+            dock_pad = 14
+            dock_w = n_items * item_w + dock_pad * 2
+            dock_h = 68
+            dock_x = (sw - dock_w) // 2
+            dock_y = sh - dock_h - 12
+            self.dock_bounds = (dock_x, dock_y, dock_w, dock_h, dock_pad, item_w)
+
+            x1, y1, x2, y2 = dock_x, dock_y, dock_x + dock_w, dock_y + dock_h
+            self.draw_rounded_pill(
+                x1 - 3, y1 - 2, x2 + 3, y2 + 4, r=24,
+                fill="#06050D", outline="#1A1530", width=2, tags=("dock_frame",)
+            )
+            self.draw_rounded_pill(
+                x1, y1, x2, y2, r=22,
+                fill=BG_DOCK, outline=C_VIOLET, width=1.5, tags=("dock_frame",)
+            )
+            self.canvas.create_line(
+                x1 + 24, y1 + 2, x2 - 24, y1 + 2,
+                fill="#2D2452", width=1, tags=("dock_frame",)
+            )
+
+            for i, item_cfg in enumerate(self.dock_items_config):
+                ix = dock_x + dock_pad + i * item_w
+                self._render_dock_item(ix, dock_y + 6, item_cfg, item_w, tk)
+
+        def draw_rounded_pill(self, x1, y1, x2, y2, r=22, fill=BG_DOCK, outline=C_VIOLET, width=1.5, tags=("dock_frame",)):
+            self.canvas.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90, fill=fill, outline="", tags=tags)
+            self.canvas.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90, fill=fill, outline="", tags=tags)
+            self.canvas.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90, fill=fill, outline="", tags=tags)
+            self.canvas.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90, fill=fill, outline="", tags=tags)
+            self.canvas.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline="", tags=tags)
+            self.canvas.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline="", tags=tags)
+            if outline and width > 0:
+                self.canvas.create_line(x1 + r, y1, x2 - r, y1, fill=outline, width=width, tags=tags)
+                self.canvas.create_line(x1 + r, y2, x2 - r, y2, fill=outline, width=width, tags=tags)
+                self.canvas.create_line(x1, y1 + r, x1, y2 - r, fill=outline, width=width, tags=tags)
+                self.canvas.create_line(x2, y1 + r, x2, y2 - r, fill=outline, width=width, tags=tags)
+                self.canvas.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90, style="arc", outline=outline, width=width, tags=tags)
+                self.canvas.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90, style="arc", outline=outline, width=width, tags=tags)
+                self.canvas.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90, style="arc", outline=outline, width=width, tags=tags)
+                self.canvas.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90, style="arc", outline=outline, width=width, tags=tags)
+
+        def _render_dock_item(self, x, y, item_cfg, item_w, tk):
+            icon_file = item_cfg["icon"]
+            label = item_cfg["label"]
+            app_id = item_cfg["id"]
+            center_x = x + item_w // 2
+            tag = f"dock_{app_id}"
+
+            bg_slot = self.canvas.create_rectangle(
+                x + 2, y, x + item_w - 2, y + 55, fill="", outline="", tags=(tag,)
+            )
+
+            pimg = self._load_photo(icon_file, tk) or self._load_photo(icon_file.replace("_48", ""), tk)
+            if pimg:
+                self.canvas.create_image(center_x, y + 23, image=pimg, tags=(tag,))
+            else:
+                self.canvas.create_oval(center_x - 18, y + 5, center_x + 18, y + 41, fill=C_VIOLET, tags=(tag,))
+
+            lbl_id = self.canvas.create_text(
+                center_x, y + 48, text=label, fill=C_LILAC, font=("DejaVu Sans", 7, "bold"), tags=(tag,)
+            )
+
+            dot_id = self.canvas.create_oval(
+                center_x - 3, y + 56, center_x + 3, y + 61,
+                fill=C_CYAN, outline="", state="hidden", tags=(tag,)
+            )
+            self.dock_dot_ids[app_id] = dot_id
+
+            def on_enter(_e):
+                self.canvas.itemconfig(bg_slot, fill=BG_ELEVATED, outline=C_VIOLET)
+                self.canvas.itemconfig(lbl_id, fill=C_CYAN)
+
+            def on_leave(_e):
+                self.canvas.itemconfig(bg_slot, fill="", outline="")
+                self.canvas.itemconfig(lbl_id, fill=C_LILAC)
+
+            def on_left_click(_e):
+                self.canvas.itemconfig(lbl_id, fill=C_WHITE)
+                self._schedule_after(120, lambda: self.canvas.itemconfig(lbl_id, fill=C_CYAN))
+                if not raise_app_window(item_cfg.get("wm_classes", [])):
+                    self._run_cmd(item_cfg["cmd"])
+                self._schedule_after(350, self._refresh_dots_once)
+
+            self.canvas.tag_bind(tag, "<Enter>", on_enter)
+            self.canvas.tag_bind(tag, "<Leave>", on_leave)
+            self.canvas.tag_bind(tag, "<Button-1>", on_left_click)
+            self.canvas.tag_bind(tag, "<Button-2>", lambda e, c=item_cfg: self.show_dock_context_menu(e, c))
+            self.canvas.tag_bind(tag, "<Button-3>", lambda e, c=item_cfg: self.show_dock_context_menu(e, c))
+
+        def show_dock_context_menu(self, event, item_cfg):
+            import tkinter as tk
+            if hasattr(self, "_active_dock_menu") and self._active_dock_menu:
+                try:
+                    self._active_dock_menu.destroy()
+                except Exception:
+                    pass
+
+            menu = tk.Menu(
+                self, tearoff=0, bg=BG_SURFACE, fg=C_WHITE,
+                activebackground=C_VIOLET, activeforeground=C_WHITE, font=("DejaVu Sans", 9),
+            )
+            self._active_dock_menu = menu
+
+            running = is_app_running(item_cfg["cmd"][0], item_cfg.get("wm_classes", []))
+            status_text = "ACTIVE" if running else "STANDBY"
+            menu.add_command(label=f"  {item_cfg['label']}  [{status_text}]", state="disabled")
+            menu.add_separator()
+            menu.add_command(label="  Open New Window", command=lambda: self._run_cmd(item_cfg["cmd"]))
+
+            if running:
+                menu.add_command(
+                    label="  Bring to Front",
+                    command=lambda: raise_app_window(item_cfg.get("wm_classes", [])),
+                )
+                menu.add_command(
+                    label="  Close Application",
+                    command=lambda: close_app_window(item_cfg.get("wm_classes", []), item_cfg["cmd"][0]),
+                )
+
+            actions = item_cfg.get("actions", [])
+            if actions:
+                menu.add_separator()
+                for act_lbl, act_cmd in actions:
+                    menu.add_command(label=f"  {act_lbl}", command=lambda c=act_cmd: self._run_cmd(c))
+
+            total_items = (menu.index("end") + 1) if menu.index("end") is not None else 6
+            approx_h = total_items * 26 + 10
+            sh = self.winfo_screenheight()
+            sw = self.winfo_screenwidth()
+            popup_y = event.y_root - approx_h - 10
+            if popup_y < 40:
+                popup_y = max(40, sh - approx_h - 80)
+            popup_x = max(10, min(event.x_root - 40, sw - 250))
+            try:
+                menu.tk_popup(popup_x, popup_y)
+            except Exception:
+                pass
+
+        def _refresh_dots_once(self):
+            if self._closing:
+                return
+            for item_cfg in self.dock_items_config:
+                dot_id = self.dock_dot_ids.get(item_cfg["id"])
+                if not dot_id:
+                    continue
+                if is_app_running(item_cfg["cmd"][0], item_cfg.get("wm_classes", [])):
+                    self.canvas.itemconfig(dot_id, fill=C_CYAN, state="normal")
+                else:
+                    self.canvas.itemconfig(dot_id, fill=BG_DOCK, state="hidden")
+
+        def update_running_indicators(self):
+            self._refresh_dots_once()
+            self._schedule_after(1500, self.update_running_indicators)
+
+        def refresh_desktop(self):
+            self.reload_wallpaper()
+            self._refresh_dots_once()
+            self.lower()
+
+        def _run_cmd(self, cmd_args):
+            try:
+                resolved = resolve_command(cmd_args)
+                subprocess.Popen(
+                    resolved,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    env=_tool_env(),
+                )
+            except Exception as e:
+                print(f"Error launching {cmd_args}: {e}")
+
+    app = OmniqDesktopBackdrop()
+    app.mainloop()
+
+def main():
+    if "--test" in sys.argv:
+        import tkinter
+        assert len(DESKTOP_SHORTCUTS_SPEC) == 6, "Expected 6 desktop shortcuts"
+        assert len(DOCK_ITEMS_SPEC) == 14, "Expected 14 pinned dock apps"
+        wp = resolve_wallpaper_path("wallpaper.png")
+        assert wp and os.path.isfile(wp), "Default wallpaper.png must resolve"
+        print("[+] omniq-desktop-backdrop headless self-test passed (6 shortcuts, 14 dock apps).")
+        return 0
+
+    run_desktop_backdrop()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

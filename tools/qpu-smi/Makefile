@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
-CC ?= clang
+CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -pthread \
           -I../../runtime/libomniq-qpu/include \
           -I../../kernel/include/uapi
@@ -17,4 +16,3 @@ clean:
 	rm -f $(TARGET)
 
 .PHONY: all clean
-

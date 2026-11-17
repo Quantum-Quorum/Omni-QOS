@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+
+import ctypes
+import json
+import math
+import os
+import signal
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler
+from typing import Any, Dict
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+for p in [
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    "/opt/omniq/src",
+    "/usr/lib/python3/dist-packages",
+]:
+    if os.path.isdir(p) and p not in sys.path:
+        sys.path.insert(0, p)
+
+from omniqos.core import QPU
+from omniq.circuit import Circuit, Statevector
+from omniq_core_bridge import core_bridge
+
+class OmniQRealTimeDaemon:
+    def __init__(self, port: int = 9090):
+        self.port = int(port)
+        self.qpu = QPU()
+        self.running = True
+        self.lock = threading.Lock()
+        self.start_ts = time.time()
+        self.tick = 0
+        self.tri_compute_mode = "auto_synergy"
+        self.pulse_bursts = 0
+        self.kernel_release = os.uname().release
+        self.last_qec_latency_ns = 0.0
+        self.last_jitter_us = 0.0
+        self.last_rt_profile: Dict[str, Any] = {}
+        self.dmesg_ring = self._read_initial_kernel_log()
+        self._apply_realtime_tuning()
+        self._init_shm_and_sock()
+
+    def _read_initial_kernel_log(self):
+        lines = []
+        try:
+            proc = subprocess.run(["dmesg"], capture_output=True, text=True, timeout=1.5)
+            if proc.returncode == 0 and proc.stdout.strip():
+                raw = [ln.strip() for ln in proc.stdout.strip().splitlines() if ln.strip()]
+                qpu_lines = [ln for ln in raw if "omniq" in ln.lower() or "qpu" in ln.lower()]
+                lines.extend((qpu_lines + raw[-10:])[-12:])
+        except Exception:
+            pass
+        top = self.qpu.get_topology()
+        lines.append(
+            f"[omniqd] Bound port {self.port} | kernel={self.kernel_release} | dev={top.device_name} ({top.operating_state.name})"
+        )
+        return lines
+
+    def _apply_realtime_tuning(self) -> None:
+        try:
+            if hasattr(os, "sched_setaffinity") and (os.cpu_count() or 1) >= 4:
+                os.sched_setaffinity(0, {2, 3})
+        except Exception:
+            pass
+        try:
+            param = os.sched_param(95)
+            os.sched_setscheduler(0, os.SCHED_FIFO, param)
+        except Exception:
+            pass
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            libc.mlockall(3)
+        except Exception:
+            pass
+
+    def _init_shm_and_sock(self) -> None:
+        try:
+            os.makedirs("/dev/shm", exist_ok=True)
+            with open("/dev/shm/omniq_qpu0", "wb") as f:
+                f.write(b"OMNIQ_SHM_V1\x00".ljust(65536, b"\x00"))
+        except Exception:
+            pass
+        try:
+            with open("/tmp/omniq_qpu0.sock", "w") as f:
+                f.write(f"OMNIQ_IPC_READY port={self.port}\n")
+        except Exception:
+            pass
+
+    def step_telemetry(self) -> None:
+        with self.lock:
+            self.tick += 1
+            if self.tick == 1 or self.tick % 40 == 0:
+                try:
+                    prof = core_bridge.measure_rt_jitter(samples=16, interval_us=100)
+                    if isinstance(prof, dict) and "avg_ns" in prof:
+                        self.last_rt_profile = prof
+                        self.last_jitter_us = round(float(prof["avg_ns"]) / 1000.0, 2)
+                except Exception:
+                    t0 = time.perf_counter_ns()
+                    time.sleep(0.0001)
+                    dt_ns = max(0, (time.perf_counter_ns() - t0) - 100_000)
+                    self.last_jitter_us = round(dt_ns / 1000.0, 2)
+                try:
+                    dma_res = self.qpu.test_dma_ring(4096)
+                    self.last_qec_latency_ns = float(dma_res["measured_ring_ns"])
+                except Exception:
+                    pass
+            ilock = self.qpu.get_interlock()
+            core_bridge.publish_shm(
+                int(round(ilock["temp_mxc_mK"] * 1000.0)),
+                int(round(self.last_qec_latency_ns)),
+                1 if ilock["tripped"] else 0,
+                self.last_jitter_us,
+            )
+
+    def get_status(self) -> Dict[str, Any]:
+        with self.lock:
+            top = self.qpu.get_topology()
+            ilock = self.qpu.get_interlock()
+            cals = self.qpu.get_calibration(0, 16)
+            core_stat = core_bridge.get_status()
+            return {
+                "service": "omniqd",
+                "status": "THERMAL_INTERLOCK_CLAMPED" if ilock["tripped"] else "NOMINAL_SUPERCONDUCTING",
+                "uptime_sec": round(time.time() - self.start_ts, 1),
+                "kernel": self.kernel_release,
+                "isolated_cores": [2, 3],
+                "jitter_us": self.last_jitter_us,
+                "qec_loop_ns": self.last_qec_latency_ns,
+                "dma_ring_ns": self.last_qec_latency_ns,
+                "tri_compute_mode": self.tri_compute_mode,
+                "pulse_bursts": self.pulse_bursts,
+                "device_name": top.device_name,
+                "operating_state": top.operating_state.name,
+                "total_qubits": top.total_qubits,
+                "total_couplers": top.total_couplers,
+                "avg_t1_us": round(top.avg_t1_us, 2),
+                "avg_t2_us": round(top.avg_t2_us, 2),
+                "cryo": {
+                    "stage_50k_K": 48.50,
+                    "stage_4k_K": 3.85,
+                    "still_mK": 820.0,
+                    "cold_plate_mK": 95.0,
+                    "mxc_mK": round(ilock["temp_mxc_mK"], 3),
+                    "threshold_mK": round(ilock["threshold_mK"], 3),
+                    "interlock_tripped": ilock["tripped"],
+                    "rf_dac_clamped": ilock["rf_dac_clamped"],
+                    "reason": ilock["reason"],
+                    "trip_count": ilock["trip_count"],
+                },
+                "sample_qubits": [
+                    {
+                        "id": c.qubit_id,
+                        "freq_ghz": round(c.frequency_ghz, 4),
+                        "t1_us": round(c.t1_us, 1),
+                        "t2_us": round(c.t2_us, 1),
+                        "f1q": round(c.gate_1q_fidelity, 5),
+                        "fread": round(c.readout_fidelity, 4),
+                    }
+                    for c in cals[:8]
+                ],
+                "core_engine": core_stat,
+                "rt_jitter_profile": self.last_rt_profile,
+            }
+
+    @staticmethod
+    def _forward_rack_interlock(trip: bool, reason: str = "OMNIQD_INTERLOCK") -> None:
+        try:
+            import socket as _sock
+            from omniq.lab.rack_manager import LabRackManager
+            mgr = LabRackManager(timeout=0.35)
+            h = str(mgr.config.get("lakeshore372_host", "127.0.0.1"))
+            p = int(mgr.config.get("lakeshore372_port", 17777))
+            with _sock.create_connection((h, p), timeout=0.15):
+                pass
+            if trip:
+                mgr.trip_safety_interlock(reason)
+            else:
+                mgr.reset_safety_interlock()
+        except Exception:
+            pass
+
+    def set_cryo_temp(self, temp_mK: float) -> Dict[str, Any]:
+        with self.lock:
+            st = self.qpu.set_cryo_temp_mK(float(temp_mK))
+            if st["tripped"]:
+                self._forward_rack_interlock(True, "MXC_OVER_50mK")
+                self.dmesg_ring.append(
+                    f"[{time.time() - self.start_ts:10.4f}] CRYO EMERGENCY: MXC={temp_mK:.2f} mK >= 50.0 mK! RF DACs + SCPI LO + Modbus clamped!"
+                )
+                self._push_os_alert(
+                    "Cryo Thermal Safety Interlock Tripped",
+                    f"Mixing chamber reached {temp_mK:.2f} mK (>= 50 mK ceiling). RF DACs & SCPI/Modbus clamped.",
+                    "critical",
+                )
+            return st
+
+    def trip_interlock(self, reason: str = "EMERGENCY_WDT_RF_CLAMP") -> Dict[str, Any]:
+        with self.lock:
+            st = self.qpu.trip_interlock(reason)
+            self._forward_rack_interlock(True, reason)
+            self.dmesg_ring.append(f"[{time.time() - self.start_ts:10.4f}] INTERLOCK TRIPPED ({reason}): RF DACs + SCPI/Modbus -> OFF")
+            self._push_os_alert("RF Microwave Interlock Engaged", f"Reason: {reason}. All DAC & SCPI channels clamped.", "critical")
+            return st
+
+    def reset_interlock(self) -> Dict[str, Any]:
+        with self.lock:
+            st = self.qpu.reset_interlock()
+            self._forward_rack_interlock(False)
+            self.dmesg_ring.append(f"[{time.time() - self.start_ts:10.4f}] INTERLOCK RESET: Cryo nominal, RF synthesis online")
+            return st
+
+    def trigger_pulse_burst(self) -> Dict[str, Any]:
+        with self.lock:
+            ilock = self.qpu.get_interlock()
+            if ilock["tripped"]:
+                return {"ok": False, "error": "RF_DAC_CLAMPED_INTERLOCK"}
+            self.pulse_bursts += 1
+            dma_res = self.qpu.test_dma_ring(4096)
+            self.last_qec_latency_ns = float(dma_res["measured_ring_ns"])
+            self.dmesg_ring.append(
+                f"[{time.time() - self.start_ts:10.4f}] Burst #{self.pulse_bursts}: DMA ring={self.last_qec_latency_ns:.0f} ns"
+            )
+            return {"ok": True, "burst_id": self.pulse_bursts, "dma_ring_ns": self.last_qec_latency_ns}
+
+    def run_shell_command(self, cmd: str) -> str:
+        c = cmd.strip()
+        if not c:
+            return ""
+        if c == "uname -a":
+            return subprocess.run(["uname", "-a"], capture_output=True, text=True).stdout.strip()
+        if c == "dmesg":
+            return "\n".join(self.dmesg_ring[-18:])
+        if c.startswith("ls") and "qpu" in c:
+            out = subprocess.run(
+                ["sh", "-c", "ls -la /dev/accel/qpu* /tmp/omniq_qpu0.sock 2>&1"],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            return out
+        if c in ("omniqd status", "status"):
+            return json.dumps(self.get_status(), indent=2)
+        if c == "trip-interlock":
+            return json.dumps(self.trip_interlock("TERMINAL_MANUAL_TRIP"))
+        if c == "reset-interlock":
+            try:
+                return json.dumps(self.reset_interlock())
+            except Exception as e:
+                return f"ERROR: {e}"
+        if c == "burst":
+            return json.dumps(self.trigger_pulse_burst())
+        if c == "qpu-smi":
+            smi_bin = os.path.join(REPO_ROOT, "bin", "qpu-smi")
+            if os.path.exists(smi_bin):
+                out = subprocess.run([smi_bin, "-c"], capture_output=True, text=True).stdout
+                return out
+        if c == "vqe-h2":
+            from omniq.chem import MolecularHamiltonian, VQESolver
+            res = VQESolver(MolecularHamiltonian.h2(0.735), layers=1).solve(steps=20)
+            return (
+                f"H2 (0.735 A) VQE Ground Energy: {res['vqe_energy_hartree']:.5f} Ha "
+                f"(Exact FCI: {res['exact_fci_hartree']:.5f} Ha, dE={res['chemical_accuracy_mHa']:.3f} mHa)"
+            )
+        if c == "cat /proc/cpuinfo":
+            try:
+                with open("/proc/cpuinfo", "r") as f:
+                    interesting = [
+                        ln.strip()
+                        for ln in f
+                        if ln.startswith(("processor", "model name", "cpu MHz", "cache size"))
+                    ]
+                return "\n".join(interesting[:16])
+            except Exception as e:
+                return f"ERROR: {e}"
+        if c == "rt-bench":
+            return json.dumps(core_bridge.measure_rt_jitter(samples=80, interval_us=100), indent=2)
+        if c == "clifford-127":
+            qasm127 = "OPENQASM 3.0; qubit[127] q; h q[0]; " + " ".join(f"cx q[{i}], q[{i+1}];" for i in range(126))
+            return json.dumps(core_bridge.simulate_clifford(qasm127, shots=128), indent=2)
+        if c == "mlkem-test":
+            return json.dumps(core_bridge.mlkem768_handshake(), indent=2)
+        return f"omniq-rt: executed '{c}' (try: uname -a, dmesg, ls /dev/accel/qpu*, qpu-smi, omniqd status, vqe-h2, burst, trip-interlock, reset-interlock)"
+
+    @staticmethod
+    def _push_os_alert(title: str, body: str, severity: str = "info") -> None:
+        alert_path = "/tmp/omniq_notifications.json"
+        try:
+            items = []
+            if os.path.exists(alert_path):
+                with open(alert_path, "r") as f:
+                    items = json.load(f)
+            items.insert(0, {"title": title, "body": body, "severity": severity, "ts": time.strftime("%H:%M:%S")})
+            items = items[:25]
+            with open(alert_path, "w") as f:
+                json.dump(items, f, indent=2)
+        except Exception:
+            pass
+
+class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+def make_handler(daemon_obj: OmniQRealTimeDaemon):
+    class OmniQApiHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass
+
+        def _send_json(self, code: int, payload: Dict[str, Any]):
+            raw = json.dumps(payload).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            if self.path in ("/api/status", "/status"):
+                self._send_json(200, daemon_obj.get_status())
+            elif self.path == "/api/health":
+                self._send_json(200, {"ok": True, "service": "omniqd"})
+            elif self.path == "/api/dmesg":
+                self._send_json(200, {"lines": daemon_obj.dmesg_ring[-30:]})
+            else:
+                self._send_json(404, {"error": "not_found"})
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+            try:
+                data = json.loads(body) if body else {}
+            except Exception:
+                data = {}
+
+            try:
+                if self.path == "/api/cryo_temp":
+                    temp = float(data.get("temp_mK", 14.25))
+                    self._send_json(200, daemon_obj.set_cryo_temp(temp))
+                elif self.path == "/api/interlock/trip":
+                    self._send_json(200, daemon_obj.trip_interlock(str(data.get("reason", "API_TRIP"))))
+                elif self.path == "/api/interlock/reset":
+                    self._send_json(200, daemon_obj.reset_interlock())
+                elif self.path == "/api/burst":
+                    self._send_json(200, daemon_obj.trigger_pulse_burst())
+                elif self.path == "/api/mode":
+                    daemon_obj.tri_compute_mode = str(data.get("mode", "auto_synergy"))
+                    self._send_json(200, {"ok": True, "mode": daemon_obj.tri_compute_mode})
+                elif self.path == "/api/command":
+                    out = daemon_obj.run_shell_command(str(data.get("cmd", "")))
+                    self._send_json(200, {"output": out})
+                elif self.path == "/api/launch":
+                    app = os.path.basename(str(data.get("app", "omniq-hilbert-space")))
+                    for cand in [f"/usr/local/bin/{app}", os.path.join(REPO_ROOT, "bin", app)]:
+                        if os.path.exists(cand) and os.access(cand, os.X_OK):
+                            env = dict(
+                                os.environ,
+                                DISPLAY=":0",
+                                XAUTHORITY="/root/.Xauthority",
+                                GDK_BACKEND="x11",
+                                GDK_PIXBUF_MODULE_FILE="/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache",
+                                XDG_DATA_DIRS="/usr/share:/usr/local/share",
+                                XDG_RUNTIME_DIR="/tmp/runtime-root",
+                                NO_AT_BRIDGE="1",
+                            )
+                            os.makedirs("/var/log/omniq", exist_ok=True)
+                            logf = open("/var/log/omniq/launch.log", "ab")
+                            subprocess.Popen([cand], env=env, stdout=logf, stderr=logf)
+                            self._send_json(200, {"launched": cand})
+                            return
+                    self._send_json(404, {"error": f"app_not_found:{app}"})
+                elif self.path == "/api/simulate":
+                    qasm = str(data.get("qasm", "OPENQASM 3.0; qubit[2] q; h q[0]; cx q[0], q[1];"))
+                    shots = int(data.get("shots", 1024))
+                    res = core_bridge.simulate_qasm(qasm, shots=shots)
+                    if res is None:
+                        c = Circuit.from_qasm(qasm)
+                        sv = c.execute()
+                        assert isinstance(sv, Statevector)
+                        res = {
+                            "num_qubits": c.num_qubits,
+                            "counts": sv.sample_counts(shots=shots),
+                            "entanglement_entropy_bits": sv.entanglement_entropy(),
+                        }
+                    self._send_json(200, res)
+                else:
+                    self._send_json(404, {"error": "not_found"})
+            except Exception as exc:
+                self._send_json(400, {"error": str(exc)})
+
+    return OmniQApiHandler
+
+def main():
+    if "--test" in sys.argv:
+        d = OmniQRealTimeDaemon(port=19090)
+        st = d.get_status()
+        assert st["total_qubits"] == 127
+        d.set_cryo_temp(62.0)
+        assert d.get_status()["cryo"]["interlock_tripped"] is True
+        d.set_cryo_temp(14.25)
+        d.reset_interlock()
+        assert d.get_status()["cryo"]["interlock_tripped"] is False
+        print("[PASS] omniqd real-time daemon & < 50 mK safety interlock verified.")
+        return
+
+    port = 9090
+    for arg in sys.argv[1:]:
+        if arg.isdigit():
+            port = int(arg)
+
+    if "--daemon" in sys.argv:
+        if os.fork() > 0:
+            sys.exit(0)
+
+    daemon_obj = OmniQRealTimeDaemon(port=port)
+
+    def rt_loop():
+        while daemon_obj.running:
+            daemon_obj.step_telemetry()
+            time.sleep(0.05)
+
+    t = threading.Thread(target=rt_loop, daemon=True)
+    t.start()
+
+    srv = ThreadingTCPServer(("0.0.0.0", port), make_handler(daemon_obj))
+
+    def shutdown_sig(signum, frame):
+        daemon_obj.running = False
+        threading.Thread(target=srv.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGINT, shutdown_sig)
+    signal.signal(signal.SIGTERM, shutdown_sig)
+    print(f"[omniqd] Real-Time Quantum Daemon listening on http://127.0.0.1:{port}")
+    srv.serve_forever()
+
+if __name__ == "__main__":
+    main()

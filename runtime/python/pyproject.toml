@@ -38,5 +38,5 @@ qpu = "omniqos.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["omniqos*"]
+include = ["omniqos*", "omniq*"]
 

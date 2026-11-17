@@ -3,17 +3,14 @@ set -e
 
 echo "[OmniQ-OS] Executing Quantum Real-Time Chroot Customization Hook..."
 
-# 1. Create quantum hardware access group
 groupadd -f quantum
 useradd -m -s /bin/bash -g quantum quantum 2>/dev/null || true
 usermod -aG quantum user 2>/dev/null || true
 
-# 2. Configure Udev rules for /dev/accel/qpu*
 cat << 'EOF' > /etc/udev/rules.d/99-omniq-qpu.rules
 KERNEL=="qpu*", SUBSYSTEM=="accel", GROUP="quantum", MODE="0666"
 EOF
 
-# 3. Register DKMS module
 if [ -d /usr/src/omniq-qpu-0.1.0-rt ]; then
     echo "[OmniQ-OS] Building and installing omniq-qpu DKMS module..."
     dkms add -m omniq-qpu -v 0.1.0-rt || true
@@ -21,11 +18,9 @@ if [ -d /usr/src/omniq-qpu-0.1.0-rt ]; then
     dkms install -m omniq-qpu -v 0.1.0-rt || true
 fi
 
-# 4. Enable Systemd Services
 systemctl enable omniqd.service || true
 systemctl enable qpu-realtime-tuning.service || true
 
-# 5. Set Plymouth Splash Theme
 if [ -d /usr/share/plymouth/themes/omniq ]; then
     plymouth-set-default-theme -R omniq || true
 fi

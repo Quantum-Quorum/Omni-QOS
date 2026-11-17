@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import time
+import ctypes
+import subprocess
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def force_system_poweroff():
+    try:
+        with open("/tmp/.omniq_shutdown", "w", encoding="utf-8") as f:
+            f.write("poweroff\n")
+    except Exception:
+        pass
+
+    subprocess.run(["sync"], check=False)
+    subprocess.run(["pkill", "-TERM", "jwm"], check=False)
+    time.sleep(0.2)
+
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.sync()
+        libc.reboot(ctypes.c_int(0x4321FEDC).value)
+    except Exception:
+        pass
+
+    for cmd in [
+        ["/bin/busybox", "poweroff", "-f"],
+        ["busybox", "poweroff", "-f"],
+        ["poweroff", "-f"],
+        ["/sbin/poweroff", "-f"],
+        ["reboot", "-f", "-p"],
+    ]:
+        try:
+            subprocess.run(cmd, check=False)
+        except Exception:
+            pass
+    sys.exit(0)
+
+def force_system_reboot():
+    try:
+        with open("/tmp/.omniq_reboot", "w", encoding="utf-8") as f:
+            f.write("reboot\n")
+    except Exception:
+        pass
+
+    subprocess.run(["sync"], check=False)
+    subprocess.run(["pkill", "-TERM", "jwm"], check=False)
+    time.sleep(0.2)
+
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.sync()
+        libc.reboot(ctypes.c_int(0x01234567).value)
+    except Exception:
+        pass
+
+    for cmd in [
+        ["/bin/busybox", "reboot", "-f"],
+        ["busybox", "reboot", "-f"],
+        ["reboot", "-f"],
+        ["/sbin/reboot", "-f"],
+    ]:
+        try:
+            subprocess.run(cmd, check=False)
+        except Exception:
+            pass
+    sys.exit(0)
+
+def force_system_suspend():
+    try:
+        subprocess.run(["systemctl", "suspend"], check=False)
+    except Exception:
+        pass
+    try:
+        with open("/sys/power/state", "w", encoding="utf-8") as f:
+            f.write("mem\n")
+    except Exception as e:
+        print(f"[!] ACPI S3 suspend error: {e}", file=sys.stderr)
+    sys.exit(0)
+
+def find_icon(name):
+    for d in [
+        "/usr/share/omniq/icons",
+        "/etc/omniq/icons",
+        os.path.join(REPO_ROOT, "etc/omniq/icons"),
+        "/usr/share/omniq/icons/16x16",
+        "/etc/omniq/icons/16x16",
+        os.path.join(REPO_ROOT, "etc/omniq/icons/16x16"),
+    ]:
+        p = os.path.join(d, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+def show_power_dialog():
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk, Gdk, GLib
+        GLib.set_prgname("omniq-power")
+        GLib.set_application_name("OmniQ Power Control")
+    except Exception:
+        force_system_poweroff()
+        return
+
+    win = Gtk.Window(title="Power Management - OmniQ-OS")
+    win.set_wmclass("omniq-power", "Omniq-power")
+    icon_path = find_icon("power_16.png") or find_icon("power.png")
+    if icon_path:
+        try:
+            win.set_icon_from_file(icon_path)
+        except Exception:
+            pass
+    win.set_default_size(450, 220)
+    win.set_position(Gtk.WindowPosition.CENTER)
+    win.set_resizable(False)
+    win.set_border_width(16)
+
+    css = b"""
+    window { background-color: #0D0B18; }
+    .power-title { color: #00E5FF; font-size: 15px; font-weight: bold; }
+    .power-desc { color: #9E97B8; font-size: 11px; }
+    .btn-poweroff {
+        background: #FF3366;
+        color: #FFFFFF;
+        font-weight: bold;
+        font-size: 12px;
+        border-radius: 8px;
+        padding: 8px 16px;
+        border: 1px solid #FF668C;
+    }
+    .btn-reboot {
+        background: linear-gradient(135deg, #8A4FFF, #5E2CE6);
+        color: #FFFFFF;
+        font-weight: bold;
+        font-size: 12px;
+        border-radius: 8px;
+        padding: 8px 16px;
+        border: 1px solid #A87BFF;
+    }
+    .btn-suspend {
+        background-color: #141126;
+        color: #00FF9D;
+        font-weight: bold;
+        font-size: 12px;
+        border-radius: 8px;
+        padding: 8px 16px;
+        border: 1px solid #00FF9D;
+    }
+    .btn-cancel {
+        background-color: #1A1530;
+        color: #EDEAF5;
+        font-size: 12px;
+        border-radius: 8px;
+        padding: 8px 16px;
+        border: 1px solid rgba(138, 79, 255, 0.35);
+    }
+    """
+    css_prov = Gtk.CssProvider()
+    css_prov.load_from_data(css)
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(), css_prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+    box.set_margin_start(4)
+    box.set_margin_end(4)
+    win.add(box)
+
+    lbl_title = Gtk.Label(label="OmniQ-OS Session & Cryo-Safe Power Control")
+    lbl_title.get_style_context().add_class("power-title")
+    lbl_title.set_xalign(0.0)
+    box.pack_start(lbl_title, False, False, 0)
+
+    lbl_desc = Gtk.Label(
+        label="Select session action. Active QPU pulse queues and telemetry logs will be synchronized safely."
+    )
+    lbl_desc.get_style_context().add_class("power-desc")
+    lbl_desc.set_xalign(0.0)
+    lbl_desc.set_line_wrap(True)
+    box.pack_start(lbl_desc, False, False, 0)
+
+    btn_grid = Gtk.Grid()
+    btn_grid.set_column_spacing(10)
+    btn_grid.set_row_spacing(10)
+    btn_grid.set_column_homogeneous(True)
+
+    btn_off = Gtk.Button(label="Power Off")
+    btn_off.get_style_context().add_class("btn-poweroff")
+    btn_off.connect("clicked", lambda _b: force_system_poweroff())
+    btn_grid.attach(btn_off, 0, 0, 1, 1)
+
+    btn_reb = Gtk.Button(label="Restart")
+    btn_reb.get_style_context().add_class("btn-reboot")
+    btn_reb.connect("clicked", lambda _b: force_system_reboot())
+    btn_grid.attach(btn_reb, 1, 0, 1, 1)
+
+    btn_susp = Gtk.Button(label="Suspend")
+    btn_susp.get_style_context().add_class("btn-suspend")
+    btn_susp.connect("clicked", lambda _b: force_system_suspend())
+    btn_grid.attach(btn_susp, 2, 0, 1, 1)
+
+    box.pack_start(btn_grid, False, False, 6)
+
+    btn_cancel = Gtk.Button(label="Cancel")
+    btn_cancel.get_style_context().add_class("btn-cancel")
+    btn_cancel.connect("clicked", lambda _b: win.destroy())
+    box.pack_end(btn_cancel, False, False, 0)
+
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+def main():
+    if "--test" in sys.argv:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib
+        GLib.set_prgname("omniq-power")
+        assert find_icon("power_16.png") is not None
+        print("[+] omniq-power headless self-test passed.")
+        return 0
+
+    if "--poweroff" in sys.argv or "--shutdown" in sys.argv:
+        force_system_poweroff()
+    elif "--reboot" in sys.argv or "-r" in sys.argv:
+        force_system_reboot()
+    elif "--suspend" in sys.argv or "-s" in sys.argv:
+        force_system_suspend()
+    else:
+        show_power_dialog()
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

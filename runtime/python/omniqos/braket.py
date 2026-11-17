@@ -1,25 +1,13 @@
-# SPDX-License-Identifier: Apache-2.0
-"""
-OmniQ-OS: Amazon Braket Device Adapter
-Enables Amazon Braket SDK quantum tasks on /dev/accel/qpu0
-"""
-
 from typing import Optional, Dict
 from .core import QPU
 
 class OmniQBraketDevice:
-    """
-    Amazon Braket device implementation for OmniQ-OS.
-    """
     def __init__(self, qpu_instance: Optional[QPU] = None):
         self._qpu = qpu_instance or QPU()
         self.arn = "arn:aws:braket:::device/qpu/omniq/transmon-127"
         self.name = "OmniQ-Transmon-127"
 
     def run(self, task_specification, shots: int = 1000, **kwargs) -> 'OmniQBraketTask':
-        """
-        Executes a Braket OpenQASM 3 program or circuit.
-        """
         qasm_source = ""
         if hasattr(task_specification, "to_ir"):
             try:

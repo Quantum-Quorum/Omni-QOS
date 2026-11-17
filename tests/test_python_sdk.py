@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
-"""
-OmniQ-OS: Python SDK & Multi-Framework Adapter Verification Test
-"""
 
 import sys
 import os
 
-# Add runtime/python to PYTHONPATH
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "runtime", "python")))
 
 from omniqos.core import QPU, QPUOperatingState, QPUTechnology
@@ -28,25 +23,22 @@ def test_core_qpu():
         assert top.total_qubits == 127
         assert top.operating_state == QPUOperatingState.SIMULATOR
 
-        # Calibration
         cal = qpu.get_calibration(0, 4)
         print(f"       • Qubit 0 Freq: {cal[0].frequency_ghz:.4f} GHz, T1: {cal[0].t1_us:.1f} us")
         assert len(cal) == 4
         assert cal[0].t1_us > 100
 
-        # Allocation
         part = qpu.allocate_partition(num_qubits=2, guard_hops=1)
         print(f"       • Partition #{part.partition_id} allocated: Qubits={part.qubits}, Guards={part.guard_qubits}")
         assert len(part.qubits) == 2
         assert len(part.guard_qubits) > 0
 
-        # Execution
         qasm = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ncx q[0], q[1];\n"
         job = part.submit(qasm, shots=1000)
         print(f"       • Bell State Counts: {job.counts} (Execution: {job.execution_time_ns} ns)")
         assert "00" in job.counts
         assert "11" in job.counts
-        assert job.counts["00"] + job.counts["11"] > 950 # Quantum entanglement verified
+        assert job.counts["00"] + job.counts["11"] > 950
 
         part.free()
     print("       [PASS] Core QPU test succeeded.\n")

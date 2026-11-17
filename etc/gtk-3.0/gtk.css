@@ -1,0 +1,318 @@
+@define-color bg_obsidian #0D0B18;
+@define-color bg_surface  #141126;
+@define-color bg_card     #1A1530;
+@define-color bg_hover    #241C45;
+@define-color bg_selected #3D1E6D;
+@define-color fg_primary  #EDEAF5;
+@define-color fg_muted    #9E97B8;
+@define-color accent_cyan #00E5FF;
+@define-color accent_violet #8A4FFF;
+@define-color accent_green #00FF9D;
+@define-color accent_crimson #FF3366;
+@define-color border_glass rgba(138, 79, 255, 0.35);
+
+window, dialog, messagedialog {
+    background-color: @bg_obsidian;
+    color: @fg_primary;
+    font-family: 'DejaVu Sans', 'Ubuntu', sans-serif;
+}
+
+headerbar {
+    background: linear-gradient(to right, #0D0B18, #1A1530);
+    border-bottom: 1px solid @accent_violet;
+    color: #FFFFFF;
+    padding: 4px 8px;
+}
+
+headerbar button {
+    background: @bg_surface;
+    border: 1px solid @border_glass;
+    border-radius: 6px;
+    color: @fg_primary;
+}
+
+headerbar button:hover {
+    background: @bg_hover;
+    border-color: @accent_cyan;
+    color: #FFFFFF;
+}
+
+box, grid, paned, viewport {
+    background-color: transparent;
+    color: @fg_primary;
+}
+
+scrolledwindow {
+    background-color: transparent;
+    border: none;
+}
+
+entry, searchentry {
+    background-color: @bg_surface;
+    border: 1px solid @border_glass;
+    border-radius: 6px;
+    color: @fg_primary;
+    padding: 6px 10px;
+    caret-color: @accent_cyan;
+}
+
+entry:focus, searchentry:focus {
+    border-color: @accent_cyan;
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.35);
+}
+
+entry selection, searchentry selection {
+    background-color: @accent_violet;
+    color: #FFFFFF;
+}
+
+textview, text {
+    background-color: #0A0814;
+    color: @fg_primary;
+}
+
+textview text:selected, text:selected {
+    background-color: @accent_violet;
+    color: #FFFFFF;
+}
+
+button {
+    background: @bg_surface;
+    background-color: @bg_surface;
+    background-image: none;
+    box-shadow: none;
+    border: 1px solid @border_glass;
+    border-radius: 6px;
+    color: @fg_primary;
+    padding: 6px 14px;
+    font-weight: 500;
+    transition: all 150ms ease-in-out;
+}
+
+button label {
+    color: inherit;
+}
+
+button:hover {
+    background: @bg_hover;
+    background-color: @bg_hover;
+    background-image: none;
+    border-color: @accent_cyan;
+    color: #FFFFFF;
+    box-shadow: 0 0 10px rgba(0, 229, 255, 0.35);
+}
+
+button:active, button:checked {
+    background: @bg_selected;
+    background-color: @bg_selected;
+    background-image: none;
+    border-color: @accent_violet;
+    color: #FFFFFF;
+}
+
+button:disabled {
+    opacity: 0.45;
+    background: @bg_surface;
+    background-color: @bg_surface;
+    background-image: none;
+    color: @fg_muted;
+}
+
+notebook, notebook > stack {
+    background-color: @bg_obsidian;
+    border: none;
+}
+
+notebook > header {
+    background-color: @bg_surface;
+    border-bottom: 1px solid @border_glass;
+}
+
+notebook > header > tabs > tab {
+    background-color: transparent;
+    border: none;
+    color: @fg_muted;
+    font-weight: bold;
+    padding: 8px 18px;
+    margin: 0 4px;
+}
+
+notebook > header > tabs > tab:checked, notebook > header > tabs > tab:active {
+    color: @accent_cyan;
+    border-bottom: 2px solid @accent_cyan;
+    background: rgba(0, 229, 255, 0.08);
+}
+
+treeview {
+    background-color: #0F0D1C;
+    color: @fg_primary;
+    border: 1px solid @border_glass;
+    font-size: 12px;
+}
+
+treeview:selected {
+    background: linear-gradient(to right, @accent_violet, #6930C3);
+    color: #FFFFFF;
+}
+
+treeview header button {
+    background-color: @bg_card;
+    border-bottom: 1px solid @accent_violet;
+    color: @accent_cyan;
+    font-weight: bold;
+    padding: 6px 10px;
+}
+
+menu, .menu, popover.menu {
+    background-color: @bg_surface;
+    border: 1px solid @accent_violet;
+    border-radius: 8px;
+    padding: 6px 4px;
+    color: @fg_primary;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.72);
+}
+
+menuitem, .menuitem {
+    background-color: transparent;
+    padding: 6px 16px;
+    color: @fg_primary;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+menuitem:hover, menuitem:selected {
+    background: linear-gradient(135deg, @accent_violet, #00A8CC);
+    color: #FFFFFF;
+}
+
+menuitem:disabled {
+    color: #5A5375;
+}
+
+separator, separator.horizontal, separator.vertical {
+    background-color: rgba(138, 79, 255, 0.25);
+    min-height: 1px;
+    min-width: 1px;
+    margin: 4px 6px;
+}
+
+combobox, combobox button, combobox > box.linked > button, combobox button.combo {
+    background-color: @bg_surface;
+    background: @bg_surface;
+    border: 1px solid @border_glass;
+    border-radius: 6px;
+    color: @fg_primary;
+    padding: 4px 10px;
+}
+
+combobox button:hover, combobox > box.linked > button:hover {
+    border-color: @accent_cyan;
+    background-color: @bg_hover;
+}
+
+combobox window, combobox popover {
+    background-color: @bg_surface;
+    border: 1px solid @accent_violet;
+    color: @fg_primary;
+}
+
+combobox cellview, combobox cellview:selected, combobox label {
+    background-color: transparent;
+    color: @fg_primary;
+}
+
+scale {
+    color: @accent_cyan;
+}
+
+scale trough {
+    background-color: #211B3D;
+    border-radius: 4px;
+    min-height: 6px;
+}
+
+scale highlight {
+    background: linear-gradient(to right, @accent_violet, @accent_cyan);
+    border-radius: 4px;
+}
+
+switch {
+    background-color: #211B3D;
+    border-radius: 12px;
+    border: 1px solid @border_glass;
+}
+
+switch:checked {
+    background: linear-gradient(135deg, #008899, @accent_cyan);
+    border-color: @accent_cyan;
+}
+
+switch slider {
+    background-color: #FFFFFF;
+    border-radius: 50%;
+    margin: 2px;
+    min-width: 18px;
+    min-height: 18px;
+}
+
+scrollbar {
+    background-color: transparent;
+}
+
+scrollbar trough {
+    background-color: rgba(13, 11, 24, 0.4);
+    border-radius: 4px;
+}
+
+scrollbar slider {
+    background-color: rgba(138, 79, 255, 0.42);
+    border-radius: 4px;
+    min-width: 6px;
+    min-height: 6px;
+}
+
+scrollbar slider:hover {
+    background-color: @accent_cyan;
+}
+
+tooltip {
+    background-color: @bg_surface;
+    border: 1px solid @accent_violet;
+    border-radius: 6px;
+    color: #D8B5FF;
+    padding: 4px 10px;
+    font-size: 11px;
+}
+
+filechooser, .file-chooser, filechooser list, filechooser treeview {
+    background-color: @bg_obsidian;
+    color: @fg_primary;
+}
+
+filechooser .sidebar, filechooser placessidebar {
+    background-color: @bg_surface;
+    border-right: 1px solid @border_glass;
+    color: @fg_primary;
+}
+
+filechooser placessidebar row {
+    color: @fg_primary;
+    background-color: transparent;
+}
+
+filechooser placessidebar row:selected {
+    background-color: @accent_violet;
+    color: #FFFFFF;
+}
+
+infobar {
+    background-color: @bg_card;
+    border: 1px solid @accent_violet;
+    color: @fg_primary;
+}
+
+statusbar {
+    background-color: #090714;
+    color: @fg_muted;
+    border-top: 1px solid @border_glass;
+}

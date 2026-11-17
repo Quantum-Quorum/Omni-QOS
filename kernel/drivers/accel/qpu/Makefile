@@ -1,20 +1,4 @@
-# SPDX-License-Identifier: GPL-2.0
-#
-# OmniQ-OS Kernel Module Makefile
-#
-
-KDIR ?= /lib/modules/$(shell uname -r)/build
-PWD := $(shell pwd)
-
-default:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
-
-clean:
-	$(MAKE) -C $(KDIR) M=$(PWD) clean
-
-install:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
-	depmod -a
-
-.PHONY: default clean install
-
+export KBUILD_OUTPUT = /usr/src/linux-headers-7.0.0-43-generic
+export KBUILD_EXTMOD = /home/beast/Downloads/qos/Omni-QOS/kernel/drivers/accel/qpu
+export KBUILD_EXTMOD_OUTPUT = /home/beast/Downloads/qos/Omni-QOS/kernel/drivers/accel/qpu
+include /usr/src/linux-headers-7.0.0-43-generic/Makefile

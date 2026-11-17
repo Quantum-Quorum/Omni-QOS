@@ -1,0 +1,4 @@
+KERNEL=="qpu*", SUBSYSTEM=="accel", MODE="0660", GROUP="quantum"
+KERNEL=="qpu[0-9]*", MODE="0660", GROUP="quantum", SYMLINK+="accel/%k"
+
+KERNEL=="ttyS0", MODE="0660", GROUP="quantum"

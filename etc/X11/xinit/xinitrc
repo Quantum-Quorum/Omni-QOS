@@ -1,0 +1,76 @@
+#!/bin/sh
+
+if [ "${1:-}" = "--test" ]; then
+    sh -n "$0" && echo "[+] xinitrc syntax OK"
+    exit 0
+fi
+
+export DISPLAY=${DISPLAY:-:0}
+export PATH=/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin
+export LD_LIBRARY_PATH=/usr/local/lib:/opt/omniq/lib:/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu
+export HOME=${HOME:-/root}
+export XCURSOR_THEME=DMZ-White
+export XCURSOR_SIZE=24
+export XCURSOR_PATH=/usr/share/icons
+export TCL_LIBRARY=/usr/share/tcltk/tcl8.6
+export TK_LIBRARY=/usr/share/tcltk/tk8.6
+export PYTHONPATH=/usr/lib/python3.12:/usr/lib/python3/dist-packages:/usr/lib/python3.12/site-packages
+export QT_QPA_PLATFORM=xcb
+export QT_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/qt5/plugins
+export QT_X11_NO_MITSHM=1
+export GDK_BACKEND=x11
+export GDK_PIXBUF_MODULE_FILE=/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache
+export XDG_DATA_DIRS=/usr/share:/usr/local/share
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+export NO_AT_BRIDGE=1
+
+mkdir -p /tmp/runtime-root /dev/pts /dev/shm /dev/accel /var/log /var/log/omniq /tmp /var/run/dbus /run/dbus /var/lib/dbus /root/circuits
+chmod 700 /tmp/runtime-root 2>/dev/null || true
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts -o gid=5,mode=620 2>/dev/null || true
+mountpoint -q /dev/shm || mount -t tmpfs tmpfs /dev/shm -o mode=1777 2>/dev/null || true
+
+[ ! -f /var/lib/dbus/machine-id ] && dbus-uuidgen --ensure 2>/dev/null || true
+[ ! -f /etc/machine-id ] && [ -f /var/lib/dbus/machine-id ] && cp -a /var/lib/dbus/machine-id /etc/machine-id 2>/dev/null || true
+if ! pgrep -x dbus-daemon >/dev/null 2>&1 && [ -x /usr/bin/dbus-daemon ]; then
+    /usr/bin/dbus-daemon --system --fork 2>/dev/null || true
+fi
+
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-launch >/dev/null 2>&1; then
+    eval $(dbus-launch --sh-syntax --exit-with-session)
+    export DBUS_SESSION_BUS_ADDRESS
+    export DBUS_SESSION_BUS_PID
+fi
+
+xset s off -dpms 2>/dev/null || true
+
+[ -f /etc/X11/Xresources ] && xrdb -merge /etc/X11/Xresources 2>/dev/null || true
+[ -f "$HOME/.Xresources" ] && xrdb -merge "$HOME/.Xresources" 2>/dev/null || true
+
+xsetroot -solid "#0D0B18" -cursor_name left_ptr 2>/dev/null || true
+
+[ -c /dev/accel/qpu0 ] || mknod -m 660 /dev/accel/qpu0 c 241 0 2>/dev/null || true
+
+if ! pgrep -x omniqd >/dev/null 2>&1; then
+    for d_bin in /usr/local/bin/omniqd /usr/bin/omniqd /bin/omniqd; do
+        if [ -x "$d_bin" ]; then
+            "$d_bin" 9090 >/var/log/omniq/omniqd.log 2>&1 &
+            break
+        fi
+    done
+fi
+
+if [ -x /usr/local/bin/omniq-compositor ]; then
+    /usr/local/bin/omniq-compositor start >/var/log/omniq/compositor-start.log 2>&1 &
+fi
+
+(
+    while true; do
+        if [ -x /usr/local/bin/omniq-desktop-backdrop ]; then
+            /usr/local/bin/omniq-desktop-backdrop >>/var/log/omniq/desktop-backdrop.log 2>&1
+        fi
+        sleep 2
+    done
+) &
+
+echo "[*] Launching OmniQ-OS Desktop Window Manager (JWM)..."
+exec /usr/bin/jwm -f /etc/jwm/system.jwmrc

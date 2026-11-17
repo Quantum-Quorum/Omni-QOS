@@ -1,0 +1,1090 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import pty
+import random
+import signal
+import socket
+import socketserver
+import struct
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Dict, List, Optional, Tuple
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+for _p in (
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    "/opt/omniq/runtime/python",
+    "/opt/omniq/src",
+):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from omniq.circuit import Circuit
+from omniq.lab import LabRackManager, SCPITransport
+
+class CryoRackState:
+
+    RUO2_R0_OHMS: float = 850.0
+    RUO2_T0_KELVIN: float = 0.72
+
+    HEATER_RANGE_FULLSCALE_UW: Dict[int, float] = {
+        0: 0.0,
+        1: 1.0,
+        2: 10.0,
+        3: 100.0,
+        4: 1000.0,
+        5: 5000.0,
+        6: 10000.0,
+        7: 25000.0,
+        8: 50000.0,
+    }
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.start_ts = time.time()
+        self._rng = random.Random(42)
+
+        self.t_50k: float = 48.20
+        self.t_4k: float = 3.82
+        self.t_still: float = 0.815
+        self.t_cold_plate: float = 0.095
+        self.t_mxc: float = 0.01405
+
+        self.flow_mmol_s: float = 0.85
+        self.cooldown_boost_active: bool = False
+        self.p1_condensing_mbar: float = 845.0
+        self.p2_still_mbar: float = 0.62
+        self.p3_backing_mbar: float = 0.85
+        self.p4_forepump_mbar: float = 1.15
+        self.p5_dump_mbar: float = 412.0
+        self.p6_ovc_mbar: float = 1.4e-6
+        self.turbo1_hz: float = 820.0
+
+        self.mxc_setpoint_k: float = 0.0140
+        self.heater_ranges: Dict[int, int] = {0: 0, 1: 0, 2: 0}
+        self.pid_gains: Dict[int, Tuple[float, float, float]] = {
+            0: (50.0, 20.0, 0.0),
+            1: (25.0, 10.0, 0.0),
+            2: (20.0, 5.0, 0.0),
+        }
+        self.external_heater_uW: float = 0.0
+        self.active_heater_uW: float = 0.0
+        self.heater_pct: float = 0.0
+
+        self.lo_freq_hz: float = 4.85e9
+        self.lo_power_dbm: float = -10.0
+        self.lo_rf_enabled: bool = True
+
+        self.coils: List[bool] = [False] * 24
+        self.coils[0] = True
+        self.coils[1] = True
+        self.coils[2] = True
+        for v in (3, 4, 6, 9, 12, 15):
+            self.coils[v] = True
+        self.interlock_reg: int = 0
+        self.backing_override_ubar: Optional[int] = None
+
+        self.qick_shots_executed: int = 0
+        self.qick_programs_run: int = 0
+
+    @classmethod
+    def ruo2_resistance_ohms(cls, temp_kelvin: float) -> float:
+        t = max(0.004, float(temp_kelvin))
+        return cls.RUO2_R0_OHMS * math.exp((cls.RUO2_T0_KELVIN / t) ** 0.35)
+
+    def step_ode(self, dt: float = 0.1) -> None:
+        substeps = 10
+        h = float(dt) / substeps
+
+        with self.lock:
+            pt_on = self.coils[1]
+            turbo_on = self.coils[2]
+
+            target_turbo = 820.0 if turbo_on else 0.0
+            self.turbo1_hz += (target_turbo - self.turbo1_hz) * min(1.0, dt * 1.5)
+            if self.cooldown_boost_active:
+                self.flow_mmol_s = 2.10 if turbo_on else 0.05
+            else:
+                self.flow_mmol_s = (0.85 * (self.turbo1_hz / 820.0)) if turbo_on else 0.05
+
+            rng0 = self.heater_ranges.get(0, 0)
+            fs_uW = self.HEATER_RANGE_FULLSCALE_UW.get(rng0, 0.0)
+            pid_uW = 0.0
+            if rng0 > 0 and self.mxc_setpoint_k > self.t_mxc:
+                kp = self.pid_gains[0][0]
+                pid_uW = min(fs_uW, fs_uW * min(1.0, (self.mxc_setpoint_k - self.t_mxc) * kp))
+
+            total_htr_uW = self.external_heater_uW + pid_uW
+            self.active_heater_uW = total_htr_uW
+            denom_fs = fs_uW if fs_uW > 0.0 else 1000.0
+            self.heater_pct = min(100.0, (total_htr_uW / denom_fs) * 100.0) if total_htr_uW > 0 else 0.0
+
+            for _ in range(substeps):
+                q_rad_50k = 18.0
+                q_pt1 = 22.0 * ((self.t_50k - 40.0) / 8.20) if pt_on else 0.0
+                c_50k = 120.0
+                self.t_50k += h * (q_rad_50k - q_pt1) / c_50k
+
+                q_cond_4k = 0.012 * (self.t_50k - self.t_4k)
+                q_pt2 = 0.533 * ((self.t_4k - 2.80) / 1.02) if pt_on else 0.0
+                c_4k = 8.0
+                self.t_4k += h * (q_cond_4k - q_pt2) / c_4k
+
+                q_cond_still_mW = 1.45 * (self.t_4k - self.t_still)
+                q_still_cool_mW = 5.20 * self.flow_mmol_s * max(0.0, self.t_still - 0.65) / 0.165
+                c_still_mJ = 45.0
+                self.t_still += h * (q_cond_still_mW - q_still_cool_mW) / c_still_mJ
+
+                q_cond_cp_uW = 160.0 * (self.t_still - self.t_cold_plate)
+                q_hx_cp_uW = 135.5 * self.flow_mmol_s * max(0.0, self.t_cold_plate - 0.065) / 0.030
+                c_cp_uJ = 4200.0
+                self.t_cold_plate += h * (q_cond_cp_uW - q_hx_cp_uW) / c_cp_uJ
+
+                t_base = 0.0080
+                alpha_dil = 58800.0
+                q_dil_cool_uW = alpha_dil * self.flow_mmol_s * (self.t_mxc ** 2 - t_base ** 2)
+
+                rf_leak_uW = 0.60 if (self.lo_rf_enabled and self.coils[0]) else 0.15
+                q_cond_mxc_uW = 75.0 * (self.t_cold_plate - self.t_mxc) + rf_leak_uW
+                q_net_mxc_uW = q_cond_mxc_uW + total_htr_uW - q_dil_cool_uW
+
+                c_mxc_uJ_per_K = 480.0 + 28000.0 * self.t_mxc
+                self.t_mxc += h * (q_net_mxc_uW / c_mxc_uJ_per_K)
+                self.t_mxc = max(0.0085, min(4.2, self.t_mxc))
+
+            if total_htr_uW == 0.0 and not self.cooldown_boost_active and 0.0138 <= self.t_mxc <= 0.0143:
+                self.t_mxc += self._rng.uniform(-1.5e-5, 1.5e-5)
+                self.t_mxc = max(0.01385, min(0.01425, self.t_mxc))
+
+            if self.cooldown_boost_active and self.t_mxc <= 0.0144:
+                self.cooldown_boost_active = False
+                self.flow_mmol_s = 0.85
+
+            thermal_excess = max(0.0, (self.t_mxc - 0.0141) * 12.0)
+            self.p1_condensing_mbar = round(845.0 + 35.0 * thermal_excess, 3)
+            self.p2_still_mbar = round(0.62 + 0.40 * thermal_excess, 4)
+            if self.backing_override_ubar is not None:
+                self.p3_backing_mbar = round(self.backing_override_ubar / 1000.0, 4)
+            else:
+                self.p3_backing_mbar = round(0.85 + 0.50 * thermal_excess, 4)
+            self.p4_forepump_mbar = round(1.15 + 0.30 * thermal_excess, 4)
+            self.p5_dump_mbar = round(412.0 - 1.5 * thermal_excess, 3)
+
+    def channel_kelvin(self, channel: int) -> float:
+        with self.lock:
+            mapping = {
+                1: self.t_50k,
+                2: self.t_4k,
+                3: self.t_still,
+                4: self.t_4k + 0.25,
+                5: self.t_cold_plate,
+                6: self.t_mxc,
+            }
+            return float(mapping.get(channel, self.t_mxc))
+
+    def get_holding_registers(self) -> List[int]:
+        with self.lock:
+            mxc_uk = max(0, min(0xFFFFFFFF, int(round(self.t_mxc * 1_000_000.0))))
+            low16 = mxc_uk & 0xFFFF
+            high16 = (mxc_uk >> 16) & 0xFFFF
+            p_still_ubar = max(0, min(65535, int(round(self.p2_still_mbar * 1000.0))))
+            p_backing_ubar = max(0, min(65535, int(round(self.p3_backing_mbar * 1000.0))))
+            turbo_hz = max(0, min(65535, int(round(self.turbo1_hz))))
+            return [
+                low16,
+                high16,
+                p_still_ubar,
+                p_backing_ubar,
+                self.interlock_reg & 0xFFFF,
+                turbo_hz,
+            ]
+
+class _ReusableThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+class _ReusableThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+class LakeShore372SCPIHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        state: CryoRackState = self.server.rack_state
+        while True:
+            raw = self.rfile.readline()
+            if not raw:
+                break
+            line = raw.decode("ascii", errors="replace").strip()
+            if not line:
+                continue
+            responses: List[str] = []
+            for sub in line.split(";"):
+                cmd = sub.strip()
+                if not cmd:
+                    continue
+                reply = self._dispatch_scpi(state, cmd)
+                if reply is not None:
+                    responses.append(reply)
+            if responses:
+                self.wfile.write((";".join(responses) + "\n").encode("ascii"))
+                self.wfile.flush()
+
+    @staticmethod
+    def _dispatch_scpi(state: CryoRackState, cmd: str) -> Optional[str]:
+        parts = cmd.split(None, 1)
+        head = parts[0].upper()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if head == "*IDN?":
+            return "LSCI,MODEL372,LSA372-OMNIQ,1.4"
+        if head == "*OPC?":
+            return "1"
+        if head in ("*CLS", "*RST"):
+            if head == "*RST":
+                with state.lock:
+                    state.heater_ranges[0] = 0
+                    state.heater_ranges[1] = 0
+                    state.external_heater_uW = 0.0
+                    state.heater_pct = 0.0
+            return None
+        if head.startswith("RDGK?"):
+            ch_str = arg or head[5:]
+            ch = int(ch_str.split(",")[0].strip() or "6")
+            return f"{state.channel_kelvin(ch):.6f}"
+        if head.startswith("RDGR?"):
+            ch_str = arg or head[5:]
+            ch = int(ch_str.split(",")[0].strip() or "6")
+            t_k = state.channel_kelvin(ch)
+            return f"{state.ruo2_resistance_ohms(t_k):.3f}"
+        if head.startswith("HTR?"):
+            with state.lock:
+                return f"{state.heater_pct:.3f}"
+        if head == "SETP":
+            tokens = [t.strip() for t in arg.split(",")]
+            if len(tokens) >= 2:
+                out_idx = int(tokens[0])
+                val_k = float(tokens[1])
+                with state.lock:
+                    if out_idx == 0:
+                        state.mxc_setpoint_k = val_k
+            return None
+        if head.startswith("SETP?"):
+            with state.lock:
+                return f"{state.mxc_setpoint_k:.6f}"
+        if head == "RANGE":
+            tokens = [t.strip() for t in arg.split(",")]
+            if len(tokens) >= 2:
+                out_idx = int(tokens[0])
+                rng = int(tokens[1])
+                with state.lock:
+                    state.heater_ranges[out_idx] = rng
+                    if out_idx == 0 and rng == 0:
+                        state.external_heater_uW = 0.0
+                        state.active_heater_uW = 0.0
+                        state.heater_pct = 0.0
+            return None
+        if head.startswith("RANGE?"):
+            out_idx = int((arg or "0").split(",")[0].strip())
+            with state.lock:
+                return str(state.heater_ranges.get(out_idx, 0))
+        if head == "PID":
+            tokens = [t.strip() for t in arg.split(",")]
+            if len(tokens) >= 4:
+                out_idx = int(tokens[0])
+                with state.lock:
+                    state.pid_gains[out_idx] = (
+                        float(tokens[1]),
+                        float(tokens[2]),
+                        float(tokens[3]),
+                    )
+            return None
+        if head.startswith("PID?"):
+            out_idx = int((arg or "0").split(",")[0].strip())
+            with state.lock:
+                p, i, d = state.pid_gains.get(out_idx, (50.0, 20.0, 0.0))
+                return f"{p:.2f},{i:.2f},{d:.2f}"
+        if head in ("SYST:ERR?", "SYSTEM:ERROR?"):
+            return '0,"No error"'
+        if "?" in head:
+            return "0"
+        return None
+
+class RohdeSchwarzLOSCPIHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        state: CryoRackState = self.server.rack_state
+        while True:
+            raw = self.rfile.readline()
+            if not raw:
+                break
+            line = raw.decode("ascii", errors="replace").strip()
+            if not line:
+                continue
+            responses: List[str] = []
+            for sub in line.split(";"):
+                cmd = sub.strip()
+                if not cmd:
+                    continue
+                reply = self._dispatch_scpi(state, cmd)
+                if reply is not None:
+                    responses.append(reply)
+            if responses:
+                self.wfile.write((";".join(responses) + "\n").encode("ascii"))
+                self.wfile.flush()
+
+    @staticmethod
+    def _canon_scpi_header(header: str) -> str:
+        is_query = header.endswith("?")
+        core = header[:-1] if is_query else header
+        norm_nodes: List[str] = []
+        abbrev = {
+            "SOURCE": "SOUR",
+            "FREQUENCY": "FREQ",
+            "POWER": "POW",
+            "LEVEL": "LEV",
+            "IMMEDIATE": "IMM",
+            "AMPLITUDE": "AMPL",
+            "OUTPUT": "OUTP",
+            "STATE": "STAT",
+            "SYSTEM": "SYST",
+            "ERROR": "ERR",
+        }
+        for node in core.upper().lstrip(":").split(":"):
+            norm_nodes.append(abbrev.get(node, node))
+        canon = ":".join(norm_nodes)
+        return canon + ("?" if is_query else "")
+
+    @classmethod
+    def _dispatch_scpi(cls, state: CryoRackState, cmd: str) -> Optional[str]:
+        parts = cmd.split(None, 1)
+        head = cls._canon_scpi_header(parts[0])
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if head == "*IDN?":
+            return "Rohde&Schwarz,SGS100A,1416.0505k02/110421,4.2.76.0"
+        if head == "*OPC?":
+            return "1"
+        if head in ("*CLS", "*RST"):
+            if head == "*RST":
+                with state.lock:
+                    state.lo_freq_hz = 4.85e9
+                    state.lo_power_dbm = -10.0
+                    state.lo_rf_enabled = False
+            return None
+        if head in ("SOUR:FREQ:CW", "SOUR:FREQ", "FREQ:CW", "FREQ"):
+            with state.lock:
+                state.lo_freq_hz = float(arg)
+            return None
+        if head in ("SOUR:FREQ:CW?", "SOUR:FREQ?", "FREQ:CW?", "FREQ?"):
+            with state.lock:
+                return f"{state.lo_freq_hz:.3f}"
+        if head in (
+            "SOUR:POW:LEV:IMM:AMPL",
+            "SOUR:POW:AMPL",
+            "SOUR:POW",
+            "POW:LEV:IMM:AMPL",
+            "POW",
+        ):
+            with state.lock:
+                state.lo_power_dbm = float(arg)
+            return None
+        if head in (
+            "SOUR:POW:LEV:IMM:AMPL?",
+            "SOUR:POW:AMPL?",
+            "SOUR:POW?",
+            "POW:LEV:IMM:AMPL?",
+            "POW?",
+        ):
+            with state.lock:
+                return f"{state.lo_power_dbm:.2f}"
+        if head in ("OUTP:STAT", "OUTP"):
+            val = arg.upper()
+            with state.lock:
+                state.lo_rf_enabled = val in ("1", "ON", "TRUE")
+            return None
+        if head in ("OUTP:STAT?", "OUTP?"):
+            with state.lock:
+                return "1" if state.lo_rf_enabled else "0"
+        if head == "SYST:ERR?":
+            return '0,"No error"'
+        if "?" in head:
+            return "0"
+        return None
+
+class BlueforsHTTPHandler(BaseHTTPRequestHandler):
+    def log_message(self, fmt: str, *args: Any) -> None:
+        if getattr(self.server, "verbose_http", False):
+            super().log_message(fmt, *args)
+
+    def _send_json(self, code: int, payload: Dict[str, Any]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        state: CryoRackState = self.server.rack_state
+        path = self.path.split("?", 1)[0]
+
+        if path == "/values":
+            with state.lock:
+                payload = {
+                    "50K_flange_K": round(state.t_50k, 4),
+                    "4K_flange_K": round(state.t_4k, 4),
+                    "still_flange_K": round(state.t_still, 5),
+                    "cold_plate_K": round(state.t_cold_plate, 5),
+                    "mxc_flange_K": round(state.t_mxc, 6),
+                    "mxc_mK": round(state.t_mxc * 1000.0, 4),
+                    "P1_mbar": state.p1_condensing_mbar,
+                    "P2_mbar": state.p2_still_mbar,
+                    "P3_mbar": state.p3_backing_mbar,
+                    "P4_mbar": state.p4_forepump_mbar,
+                    "P5_mbar": state.p5_dump_mbar,
+                    "P6_mbar": state.p6_ovc_mbar,
+                    "turbo1_hz": round(state.turbo1_hz, 2),
+                    "pulse_tube_on": bool(state.coils[1]),
+                    "flow_mmol_s": round(state.flow_mmol_s, 4),
+                    "heater_uW": round(state.active_heater_uW, 3),
+                }
+            self._send_json(200, payload)
+            return
+
+        if path == "/status":
+            with state.lock:
+                mxc_mk = state.t_mxc * 1000.0
+                if mxc_mk >= 50.0:
+                    op_state = "QUENCH_ALARM_MXC_HOT"
+                elif state.active_heater_uW > 0.0 or mxc_mk > 20.0:
+                    op_state = "THERMAL_TRANSIENT"
+                else:
+                    op_state = "NOMINAL_BASE_TEMPERATURE"
+                payload = {
+                    "system": "Bluefors LD400 Control Software v2.4 (OmniQ Twin)",
+                    "status": op_state,
+                    "uptime_s": round(time.time() - state.start_ts, 2),
+                    "mxc_mK": round(mxc_mk, 4),
+                    "pulse_tube_on": bool(state.coils[1]),
+                    "turbo1_hz": round(state.turbo1_hz, 2),
+                    "flow_mmol_s": round(state.flow_mmol_s, 4),
+                    "plc_interlock_tripped": bool(state.interlock_reg != 0),
+                }
+            self._send_json(200, payload)
+            return
+
+        self._send_json(404, {"error": f"Unknown Bluefors endpoint {path!r}"})
+
+    def do_POST(self) -> None:
+        state: CryoRackState = self.server.rack_state
+        path = self.path.split("?", 1)[0]
+        length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+        try:
+            body = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            self._send_json(400, {"error": "Invalid JSON body"})
+            return
+
+        if path == "/control/heater":
+            power_uw = max(0.0, float(body.get("power_uW", 0.0)))
+            with state.lock:
+                state.external_heater_uW = power_uw
+                state.cooldown_boost_active = False
+                if power_uw > 0.0 and state.heater_ranges.get(0, 0) == 0:
+                    state.heater_ranges[0] = 4
+                elif power_uw == 0.0:
+                    state.active_heater_uW = 0.0
+                    state.heater_pct = 0.0
+                mxc_mk = round(state.t_mxc * 1000.0, 4)
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "injected_heater_uW": power_uw,
+                    "mxc_mK": mxc_mk,
+                },
+            )
+            return
+
+        if path == "/control/cooldown":
+            with state.lock:
+                state.external_heater_uW = 0.0
+                state.active_heater_uW = 0.0
+                state.heater_ranges[0] = 0
+                state.heater_pct = 0.0
+                state.cooldown_boost_active = True
+                mxc_mk = round(state.t_mxc * 1000.0, 4)
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "cooldown_boost_active": True,
+                    "heater_uW": 0.0,
+                    "mxc_mK": mxc_mk,
+                },
+            )
+            return
+
+        self._send_json(404, {"error": f"Unknown Bluefors POST endpoint {path!r}"})
+
+class ModbusTCPHandler(socketserver.BaseRequestHandler):
+    @staticmethod
+    def _recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = sock.recv(n - len(buf))
+            if not chunk:
+                return None if len(buf) == 0 else bytes(buf)
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def handle(self) -> None:
+        state: CryoRackState = self.server.rack_state
+        while True:
+            mbap = self._recv_exact(self.request, 7)
+            if not mbap or len(mbap) < 7:
+                break
+            tx_id, proto_id, length, unit_id = struct.unpack(">HHHB", mbap)
+            if proto_id != 0 or length < 2:
+                break
+            pdu = self._recv_exact(self.request, length - 1)
+            if not pdu or len(pdu) < 1:
+                break
+
+            resp_pdu = self._process_pdu(state, pdu)
+            resp_mbap = struct.pack(">HHHB", tx_id, 0, 1 + len(resp_pdu), unit_id)
+            self.request.sendall(resp_mbap + resp_pdu)
+
+    @staticmethod
+    def _process_pdu(state: CryoRackState, pdu: bytes) -> bytes:
+        fc = pdu[0]
+        payload = pdu[1:]
+
+        if fc == 0x01:
+            if len(payload) < 4:
+                return struct.pack(">BB", fc | 0x80, 0x03)
+            start, count = struct.unpack(">HH", payload[:4])
+            with state.lock:
+                if count < 1 or start + count > len(state.coils):
+                    return struct.pack(">BB", fc | 0x80, 0x02)
+                byte_cnt = (count + 7) // 8
+                packed = bytearray(byte_cnt)
+                for i in range(count):
+                    if state.coils[start + i]:
+                        packed[i // 8] |= 1 << (i % 8)
+            return struct.pack(">BB", 0x01, byte_cnt) + bytes(packed)
+
+        if fc == 0x03:
+            if len(payload) < 4:
+                return struct.pack(">BB", fc | 0x80, 0x03)
+            start, count = struct.unpack(">HH", payload[:4])
+            regs = state.get_holding_registers()
+            if count < 1 or start + count > len(regs):
+                return struct.pack(">BB", fc | 0x80, 0x02)
+            sel = regs[start : start + count]
+            return struct.pack(f">BB{count}H", 0x03, 2 * count, *sel)
+
+        if fc == 0x05:
+            if len(payload) < 4:
+                return struct.pack(">BB", fc | 0x80, 0x03)
+            addr, val_word = struct.unpack(">HH", payload[:4])
+            if val_word not in (0xFF00, 0x0000):
+                return struct.pack(">BB", fc | 0x80, 0x03)
+            with state.lock:
+                if addr >= len(state.coils):
+                    return struct.pack(">BB", fc | 0x80, 0x02)
+                state.coils[addr] = val_word == 0xFF00
+            return struct.pack(">BHH", 0x05, addr, val_word)
+
+        if fc == 0x06:
+            if len(payload) < 4:
+                return struct.pack(">BB", fc | 0x80, 0x03)
+            addr, val_word = struct.unpack(">HH", payload[:4])
+            with state.lock:
+                if addr > 5:
+                    return struct.pack(">BB", fc | 0x80, 0x02)
+                if addr == 4:
+                    state.interlock_reg = val_word & 0xFFFF
+                elif addr == 3:
+                    state.backing_override_ubar = val_word & 0xFFFF
+            return struct.pack(">BHH", 0x06, addr, val_word)
+
+        return struct.pack(">BB", fc | 0x80, 0x01)
+
+class QickRFSoCJSONRPCHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        state: CryoRackState = self.server.rack_state
+        while True:
+            raw = self.rfile.readline()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            resp = self._handle_rpc(state, line)
+            self.wfile.write((json.dumps(resp) + "\n").encode("utf-8"))
+            self.wfile.flush()
+
+    @staticmethod
+    def _handle_rpc(state: CryoRackState, raw_json: str) -> Dict[str, Any]:
+        try:
+            req = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {exc}"},
+            }
+
+        req_id = req.get("id")
+        method = req.get("method", "")
+        params = req.get("params", {})
+
+        if method != "qick.execute_tproc":
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": f"Method not found: {method!r}"},
+            }
+
+        with state.lock:
+            lo_on = state.lo_rf_enabled
+            hemt_bias_on = state.coils[0]
+            plc_tripped = state.interlock_reg != 0
+            mxc_mk = state.t_mxc * 1000.0
+
+        if not lo_on or not hemt_bias_on or plc_tripped:
+            reasons = []
+            if not lo_on:
+                reasons.append("R&S_LO_OUTP_OFF")
+            if not hemt_bias_on:
+                reasons.append("MODBUS_COIL0_HEMT_BIAS_OPEN")
+            if plc_tripped:
+                reasons.append("PLC_INTERLOCK_REG_TRIPPED")
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {
+                    "code": -32001,
+                    "message": f"ERR_RF_BIAS_CLAMPED ({', '.join(reasons)}; MXC={mxc_mk:.2f} mK)",
+                    "data": {
+                        "code": "ERR_RF_BIAS_CLAMPED",
+                        "reasons": reasons,
+                        "mxc_mK": round(mxc_mk, 4),
+                    },
+                },
+            }
+
+        shots = max(1, min(65536, int(params.get("shots", 1024))))
+        qasm = str(params.get("qasm", ""))
+        circ = Circuit.from_qasm(qasm) if qasm.strip() else Circuit(1)
+
+        sv = circ.execute()
+        probs = sv.probabilities()
+        t_k = max(0.008, mxc_mk * 1e-3)
+        p_therm = min(0.35, 1.0 / (1.0 + math.exp(0.2328 / t_k)))
+        dim = len(probs)
+        noisy_probs = (1.0 - p_therm) * probs + (p_therm / dim)
+        noisy_probs = noisy_probs / noisy_probs.sum()
+
+        rng = random.Random(1337 + state.qick_programs_run)
+        cdf: List[float] = []
+        acc = 0.0
+        for p in noisy_probs:
+            acc += float(p)
+            cdf.append(acc)
+
+        counts: Dict[str, int] = {}
+        nq = circ.num_qubits
+        per_qubit_bits: Dict[int, List[int]] = {q: [] for q in range(nq)}
+
+        for s_idx in range(shots):
+            u = rng.random()
+            lo_idx, hi_idx = 0, dim - 1
+            while lo_idx < hi_idx:
+                mid = (lo_idx + hi_idx) // 2
+                if u <= cdf[mid]:
+                    hi_idx = mid
+                else:
+                    lo_idx = mid + 1
+            bstr = format(lo_idx, f"0{nq}b")
+            counts[bstr] = counts.get(bstr, 0) + 1
+            if s_idx < 64:
+                for q in range(nq):
+                    bit_val = int(bstr[nq - 1 - q])
+                    per_qubit_bits[q].append(bit_val)
+
+        iq_clouds: Dict[str, Dict[str, List[float]]] = {}
+        for q, bits in per_qubit_bits.items():
+            i_pts: List[float] = []
+            q_pts: List[float] = []
+            sigma_mv = 0.65 + 2.5 * p_therm
+            for b in bits:
+                cx = 4.25 if b == 1 else -4.25
+                cy = -0.85 if b == 1 else 0.85
+                i_pts.append(round(rng.gauss(cx, sigma_mv), 3))
+                q_pts.append(round(rng.gauss(cy, sigma_mv), 3))
+            iq_clouds[f"q{q}"] = {"I_mV": i_pts, "Q_mV": q_pts}
+
+        with state.lock:
+            state.qick_programs_run += 1
+            state.qick_shots_executed += shots
+
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "ok": True,
+                "board": "Xilinx Zynq UltraScale+ RFSoC ZCU216 (QICK tProc v2)",
+                "shots": shots,
+                "counts": counts,
+                "iq_clouds": iq_clouds,
+                "mxc_mK": round(mxc_mk, 4),
+                "thermal_infidelity": round(p_therm, 6),
+            },
+        }
+
+class OmniQLabTwinDaemon:
+    BASE_PORTS = {
+        "lakeshore372_scpi": 17777,
+        "microwave_lo_scpi": 15025,
+        "bluefors_http": 19098,
+        "modbus_plc_tcp": 15020,
+        "qick_rfsoc_rpc": 18888,
+    }
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port_offset: int = 0,
+        ode_dt: float = 0.1,
+        verbose_http: bool = False,
+    ) -> None:
+        self.host = host
+        self.port_offset = int(port_offset)
+        self.ode_dt = float(ode_dt)
+        self.verbose_http = verbose_http
+
+        self.state = CryoRackState()
+        self._stop_evt = threading.Event()
+        self._servers: List[Any] = []
+        self._threads: List[threading.Thread] = []
+
+    def endpoints(self) -> Dict[str, str]:
+        o = self.port_offset
+        return {
+            "lakeshore372_scpi": f"tcp://{self.host}:{17777 + o}",
+            "microwave_lo_scpi": f"tcp://{self.host}:{15025 + o}",
+            "bluefors_http": f"http://{self.host}:{19098 + o}",
+            "modbus_plc_tcp": f"modbus://{self.host}:{15020 + o}",
+            "qick_rfsoc_rpc": f"jsonrpc://{self.host}:{18888 + o}",
+        }
+
+    def start(self) -> None:
+        o = self.port_offset
+
+        ls_srv = _ReusableThreadingTCPServer((self.host, 17777 + o), LakeShore372SCPIHandler)
+        ls_srv.rack_state = self.state
+
+        lo_srv = _ReusableThreadingTCPServer((self.host, 15025 + o), RohdeSchwarzLOSCPIHandler)
+        lo_srv.rack_state = self.state
+
+        bf_srv = _ReusableThreadingHTTPServer((self.host, 19098 + o), BlueforsHTTPHandler)
+        bf_srv.rack_state = self.state
+        bf_srv.verbose_http = self.verbose_http
+
+        plc_srv = _ReusableThreadingTCPServer((self.host, 15020 + o), ModbusTCPHandler)
+        plc_srv.rack_state = self.state
+
+        qick_srv = _ReusableThreadingTCPServer((self.host, 18888 + o), QickRFSoCJSONRPCHandler)
+        qick_srv.rack_state = self.state
+
+        self._servers = [ls_srv, lo_srv, bf_srv, plc_srv, qick_srv]
+
+        ode_thread = threading.Thread(target=self._ode_loop, name="cryo-ode-solver", daemon=True)
+        ode_thread.start()
+        self._threads.append(ode_thread)
+
+        for name, srv in zip(self.BASE_PORTS.keys(), self._servers):
+            t = threading.Thread(target=srv.serve_forever, name=f"twin-{name}", daemon=True)
+            t.start()
+            self._threads.append(t)
+
+    def _ode_loop(self) -> None:
+        while not self._stop_evt.is_set():
+            t0 = time.monotonic()
+            self.state.step_ode(self.ode_dt)
+            elapsed = time.monotonic() - t0
+            rem = max(0.005, self.ode_dt - elapsed)
+            self._stop_evt.wait(rem)
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+        for srv in self._servers:
+            try:
+                srv.shutdown()
+                srv.server_close()
+            except Exception:
+                pass
+        self._servers.clear()
+
+def _pick_free_offset(preferred_offset: int = 2000) -> int:
+    base_list = list(OmniQLabTwinDaemon.BASE_PORTS.values())
+    for candidate in [preferred_offset] + [random.randint(3000, 25000) for _ in range(20)]:
+        ok = True
+        for bp in base_list:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind(("127.0.0.1", bp + candidate))
+                except OSError:
+                    ok = False
+                    break
+        if ok:
+            return candidate
+    return preferred_offset
+
+def _verify_posix_termios_serial_scpi() -> None:
+    master_fd, slave_fd = pty.openpty()
+    slave_name = os.ttyname(slave_fd)
+
+    def _pty_responder() -> None:
+        buf = bytearray()
+        while True:
+            chunk = os.read(master_fd, 256)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if b"\n" in buf:
+                os.write(master_fd, b"LSCI,MODEL372,SERIAL-PTY,1.4\n")
+                break
+
+    th = threading.Thread(target=_pty_responder, daemon=True)
+    th.start()
+    try:
+        with SCPITransport(f"serial://{slave_name}?baud=57600", timeout=2.0) as ser_tp:
+            idn = ser_tp.query("*IDN?")
+            assert "MODEL372" in idn, f"Unexpected serial SCPI IDN: {idn!r}"
+    finally:
+        th.join(timeout=1.0)
+        for fd in (master_fd, slave_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+def run_self_test(explicit_offset: Optional[int] = None) -> int:
+    offset = explicit_offset if explicit_offset is not None else _pick_free_offset(2000)
+    twin = OmniQLabTwinDaemon(host="127.0.0.1", port_offset=offset, ode_dt=0.1)
+    twin.start()
+    eps = twin.endpoints()
+    print(f"[omniq-lab-twin] Launched isolated HiL Cryo Rack Twin (port_offset={offset}):")
+    for k, v in eps.items():
+        print(f"  - {k:20s}: {v}")
+
+    try:
+        time.sleep(0.25)
+
+        _verify_posix_termios_serial_scpi()
+        print("[PASS] 1/7 POSIX termios serial:/// SCPI framing verified (57600 8N1)")
+
+        with LabRackManager(port_offset=offset) as rack:
+            ls_idn = rack.lakeshore.identify()
+            assert "MODEL372" in ls_idn, f"Bad Lake Shore IDN: {ls_idn}"
+            stages = rack.lakeshore.read_all_stages()
+            mxc_mk_0 = stages["mxc_mK"]
+            ruo2_0 = stages["mxc_ruo2_ohms"]
+            assert 13.8 <= mxc_mk_0 <= 14.3, f"MXC base temp {mxc_mk_0} mK outside 13.8..14.3 mK"
+            assert ruo2_0 > 30000.0, f"Expected RuO2 > 30 kOhm at ~14 mK, got {ruo2_0}"
+            raw_pid = rack.send_raw_scpi("lakeshore372", "PID? 0")
+            assert "," in raw_pid
+            print(
+                f"[PASS] 2/7 Lake Shore 372 SCPI: IDN={ls_idn} | "
+                f"MXC={mxc_mk_0:.3f} mK | RuO2={ruo2_0:.1f} Ohm | 4K={stages['4K_flange_K']:.2f} K"
+            )
+
+            lo_idn = rack.microwave_lo.identify()
+            assert "SGS100A" in lo_idn, f"Bad R&S IDN: {lo_idn}"
+            rack.microwave_lo.set_frequency_hz(4.9125e9)
+            rack.microwave_lo.set_power_dbm(-8.5)
+            rack.microwave_lo.set_rf_output(True)
+            assert abs(rack.microwave_lo.get_frequency_hz() - 4.9125e9) < 1.0
+            assert abs(rack.microwave_lo.get_power_dbm() - (-8.5)) < 0.05
+            assert rack.microwave_lo.get_rf_output() is True
+            print(
+                f"[PASS] 3/7 R&S SGS100A SCPI: IDN={lo_idn} | "
+                "f_LO=4.9125 GHz | P=-8.50 dBm | OUTP=ON"
+            )
+
+            bf_vals = rack.bluefors.get_values()
+            bf_stat = rack.bluefors.get_status()
+            assert 13.8 <= bf_vals["mxc_mK"] <= 14.3
+            assert bf_vals["pulse_tube_on"] is True
+            assert bf_vals["P3_mbar"] < 2.50
+            assert bf_stat["status"] == "NOMINAL_BASE_TEMPERATURE"
+            print(
+                f"[PASS] 4/7 Bluefors HTTP JSON: status={bf_stat['status']} | "
+                f"flow={bf_vals['flow_mmol_s']} mmol/s | P3_backing={bf_vals['P3_mbar']} mbar"
+            )
+
+            rack.plc.set_valve(7, True)
+            plc_st = rack.plc.get_manifold_state()
+            assert plc_st["valves"][6] is True and plc_st["valve_map"]["V7"] is True
+            assert plc_st["rf_hemt_bias_enable"] is True
+            assert plc_st["interlock_tripped"] is False
+            assert 13500 <= plc_st["mxc_uK"] <= 14600
+            rack.plc.set_valve(7, False)
+            assert rack.plc.get_manifold_state()["valves"][6] is False
+            print(
+                f"[PASS] 5/7 Binary MBAP Modbus/TCP PLC: MXC={plc_st['mxc_uK']} uK | "
+                f"Turbo={plc_st['turbo_speed_hz']} Hz | Valve V7 toggle verified"
+            )
+
+            bell = Circuit(2).h(0).cx(0, 1).measure_all()
+            qick_res = rack.dispatch_qick_circuit(bell, shots=1024)
+            assert qick_res["ok"] is True, f"QICK dispatch failed: {qick_res}"
+            asm = qick_res["assembly"]
+            for op in ("regwi", "bitwi", "seti", "synci", "pulse", "read", "waiti", "condj"):
+                assert op in asm, f"Missing authentic QICK tProc v2 instruction {op!r}"
+            assert qick_res["syndrome_feedback_ns"] < 500.0
+            env_types = {w["envelope_type"] for w in qick_res["waveforms"]}
+            assert "DRAG_GAUSSIAN" in env_types and "CROSS_RESONANCE" in env_types
+            counts = qick_res["counts"]
+            bell_fidelity_shots = counts.get("00", 0) + counts.get("11", 0)
+            assert bell_fidelity_shots > 950, f"Unexpected Bell counts: {counts}"
+            assert "q0" in qick_res["iq_clouds"] and len(qick_res["iq_clouds"]["q0"]["I_mV"]) == 64
+            print(
+                f"[PASS] 6/7 QICK ZCU216 tProc v2: {qick_res['total_cycles']} cycles "
+                f"({qick_res['duration_ns']:.1f} ns, feedback={qick_res['syndrome_feedback_ns']:.1f} ns < 500 ns) | "
+                f"Bell counts={counts}"
+            )
+
+            rack.bluefors.inject_heat_load_uW(300.0)
+            deadline = time.monotonic() + 5.0
+            hot_mk = 0.0
+            while time.monotonic() < deadline:
+                hot_mk = rack.lakeshore.read_kelvin(6) * 1000.0
+                if hot_mk >= 52.0:
+                    break
+                time.sleep(0.1)
+            assert hot_mk >= 50.0, f"MXC failed to warm past 50 mK under 300 uW load (got {hot_mk} mK)"
+            hot_ruo2 = rack.lakeshore.read_resistance_ohms(6)
+            assert hot_ruo2 < ruo2_0, "RuO2 resistance must decrease as MXC warms"
+
+            trip_res = rack.enforce_safety_interlock()
+            assert trip_res["tripped"] is True
+            assert rack.microwave_lo.get_rf_output() is False
+            assert abs(rack.microwave_lo.get_power_dbm() - (-120.0)) < 0.1
+            assert rack.lakeshore.read_heater_pct() == 0.0
+            plc_tripped = rack.plc.get_manifold_state()
+            assert plc_tripped["rf_hemt_bias_enable"] is False
+            assert plc_tripped["interlock_tripped"] is True
+
+            clamped_res = rack.qick.execute(bell, shots=256, raise_on_error=False)
+            assert clamped_res["ok"] is False
+            assert clamped_res["error"] == "ERR_RF_BIAS_CLAMPED", f"Expected ERR_RF_BIAS_CLAMPED, got {clamped_res}"
+
+            rack.bluefors.trigger_cooldown()
+            cool_deadline = time.monotonic() + 6.0
+            cooled_mk = hot_mk
+            while time.monotonic() < cool_deadline:
+                cooled_mk = rack.lakeshore.read_kelvin(6) * 1000.0
+                if cooled_mk <= 16.0:
+                    break
+                time.sleep(0.1)
+            assert cooled_mk < 50.0, f"MXC failed to cool below 50 mK (got {cooled_mk} mK)"
+
+            reset_res = rack.reset_safety_interlock()
+            assert reset_res["ok"] is True and reset_res["tripped"] is False
+            assert rack.microwave_lo.get_rf_output() is True
+            assert rack.plc.get_manifold_state()["rf_hemt_bias_enable"] is True
+
+            post_res = rack.dispatch_qick_circuit("OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ncx q[0], q[1];\n", shots=512)
+            assert post_res["ok"] is True
+            poll_summary = rack.poll_all(enforce_interlock=True)
+            assert poll_summary["interlock_tripped"] is False
+            assert "stages" in poll_summary and "plc" in poll_summary
+
+            print(
+                f"[PASS] 7/7 Thermal Quench Trip & Cooldown Recovery: "
+                f"peaked {hot_mk:.2f} mK (RuO2={hot_ruo2:.0f} Ohm) -> "
+                f"clamped LO+Heater+Modbus ({clamped_res['error']}) -> "
+                f"cooled to {cooled_mk:.2f} mK & resumed QICK execution!"
+            )
+
+        print("[omniq-lab-twin] ALL 7 HARDWARE-IN-THE-LOOP PROTOCOL & SAFETY TESTS PASSED (100%).")
+        return 0
+    finally:
+        twin.stop()
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="OmniQ-OS v2.0 Multi-Protocol Cryogenic Dilution Lab Digital-Twin Daemon"
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    parser.add_argument(
+        "--port-offset",
+        type=int,
+        default=None,
+        help="Port offset added to all 5 lab protocol listeners (default: 0, or auto in --test)",
+    )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run continuously as a background-spawned lab twin service",
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Run full end-to-end multi-protocol & <50mK quench interlock verification and exit",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose HTTP request logging",
+    )
+    args = parser.parse_args()
+
+    if args.test:
+        return run_self_test(explicit_offset=args.port_offset)
+
+    offset = args.port_offset if args.port_offset is not None else 0
+    daemon = OmniQLabTwinDaemon(
+        host=args.host,
+        port_offset=offset,
+        ode_dt=0.1,
+        verbose_http=args.verbose,
+    )
+    daemon.start()
+
+    stop_flag = threading.Event()
+
+    def _sig_handler(signum: int, _frame: Any) -> None:
+        stop_flag.set()
+
+    signal.signal(signal.SIGINT, _sig_handler)
+    signal.signal(signal.SIGTERM, _sig_handler)
+
+    print(f"[omniq-lab-twin] Cryogenic Dilution Lab Digital-Twin Rack ONLINE (offset={offset}):")
+    for name, uri in daemon.endpoints().items():
+        print(f"  - {name:20s}: {uri}")
+
+    try:
+        while not stop_flag.is_set():
+            stop_flag.wait(0.5)
+    finally:
+        daemon.stop()
+        print("[omniq-lab-twin] Shut down cleanly.")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

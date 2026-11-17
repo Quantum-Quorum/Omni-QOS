@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: Apache-2.0
-"""
-OmniQ-OS Permanent Disk Installer
-Installs OmniQ-OS to internal NVMe/SATA/virtio storage drives.
-Configures GPT partitioning, EFI System Partition (ESP), ext4 rootfs,
-UUID-based /etc/fstab, GRUB EFI bootloader, and optional quantum persistence.
-"""
 
 import os
 import sys
@@ -26,12 +19,12 @@ GRAY = "\033[38;2;100;116;139m"
 RESET = "\033[0m"
 
 BANNER = f"""{CYAN}
-   ___                  _  ____         ___  ____  
-  / _ \\ _ __ ___  _ __ (_)/ __ \\       / _ \\/ ___| 
- | | | | '_ ` _ \\| '_ \\| | |  | | ___ | | | \\___ \\ 
+   ___                  _  ____         ___  ____
+  / _ \\ _ __ ___  _ __ (_)/ __ \\       / _ \\/ ___|
+ | | | | '_ ` _ \\| '_ \\| | |  | | ___ | | | \\___ \\
  | |_| | | | | | | | | | | |__| | ___ | |_| |___) |
-  \\___/|_| |_| |_|_| |_|_|\\___\\_\\      \\___/|____/ 
-                                                    
+  \\___/|_| |_| |_|_| |_|_|\\___\\_\\      \\___/|____/
+
 {WHITE} OmniQ-OS: Real-Time Quantum Linux Disk Installer{RESET}
 {GRAY} Permanent NVMe / SATA / VirtIO Storage Deployment Engine{RESET}
 """
@@ -68,7 +61,6 @@ class DiskInstaller:
                 ro = dev.get("ro", False)
                 size_bytes = int(dev.get("size", 0))
 
-                # Skip read-only, loop, ram, and tiny devices (< 4GB)
                 if ro or dev_type != "disk" or name.startswith("loop") or name.startswith("ram"):
                     continue
                 if size_bytes < 4 * 1024 * 1024 * 1024:
@@ -89,7 +81,6 @@ class DiskInstaller:
         except Exception as e:
             self.log(f"Disk scanning error: {e}", "WARN")
 
-        # Mock fallback for non-Linux or test container environments
         if not self.available_disks and not os.path.exists("/proc/version"):
             self.available_disks.append({
                 "path": "/dev/sda",
@@ -127,15 +118,12 @@ class DiskInstaller:
 
     def partition_disk(self, disk: str):
         self.log(f"Creating GPT partition table on {disk}...", "INFO")
-        # Wipe filesystem and partition signatures
         self.run_cmd(["wipefs", "-a", disk], check=False)
         self.run_cmd(["sgdisk", "-Z", disk], check=False)
 
-        # 1: EFI System Partition (512MB)
         self.log("Allocating 512MB EFI System Partition (ESP)...", "INFO")
         self.run_cmd(["sgdisk", "-n", "1:2048:+512M", "-t", "1:ef00", "-c", "1:EFI-SYSTEM", disk], check=False)
 
-        # 2: Root partition (OmniQ-Root, ext4)
         if self.enable_persistence:
             self.log("Allocating root partition (80% remaining) and persistence partition (20%)...", "INFO")
             self.run_cmd(["sgdisk", "-n", "2:0:+24G", "-t", "2:8300", "-c", "2:OmniQ-Root", disk], check=False)
@@ -144,7 +132,6 @@ class DiskInstaller:
             self.log("Allocating root partition (100% remaining)...", "INFO")
             self.run_cmd(["sgdisk", "-n", "2:0:0", "-t", "2:8300", "-c", "2:OmniQ-Root", disk], check=False)
 
-        # Re-read partition table
         self.run_cmd(["partprobe", disk], check=False)
         time.sleep(1)
 
@@ -178,7 +165,6 @@ class DiskInstaller:
         self.run_cmd(["mount", esp_part, esp_mount], check=False)
 
         self.log("Synchronizing OmniQ-OS root filesystem to target storage...", "INFO")
-        # In live system, copy / or extract squashfs
         src_root = "/"
         exclude_args = [
             "--exclude=/proc/*", "--exclude=/sys/*", "--exclude=/dev/*",
@@ -189,7 +175,6 @@ class DiskInstaller:
         rsync_cmd = ["rsync", "-aHAXx", "--info=progress2"] + exclude_args + [src_root, target_mount]
         self.run_cmd(rsync_cmd, check=False)
 
-        # Ensure mount points exist
         for d in ["proc", "sys", "dev", "run", "tmp", "mnt", "media", "cdrom"]:
             os.makedirs(os.path.join(target_mount, d), exist_ok=True)
 
@@ -244,7 +229,6 @@ tmpfs               /dev/shm    tmpfs   defaults,noatime,size=4G   0 0
         print(f"{CYAN}======================================================================{RESET}")
         print(f" You can now remove your bootable media and reboot into OmniQ-OS.\n")
 
-
 def main():
     parser = argparse.ArgumentParser(description="OmniQ-OS Permanent Disk Installer")
     parser.add_argument("--target-disk", help="Target disk path (e.g. /dev/nvme0n1 or /dev/sda)")
@@ -258,7 +242,6 @@ def main():
         enable_persistence=(not args.no_persistence)
     )
     installer.execute_installation()
-
 
 if __name__ == "__main__":
     main()

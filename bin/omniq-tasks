@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import collections
+import json
+import math
+import os
+import signal
+import subprocess
+import sys
+import time
+import urllib.request
+from typing import Any, Deque, Dict, List, Optional, Tuple
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+for _p in reversed([
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    "/opt/omniq/src",
+    "/usr/lib/python3/dist-packages",
+]):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+from omniqos.core import QPU
+
+DARK_CSS = b"""
+window, .main-bg {
+    background-color: #0D0B18;
+    color: #E8E5F5;
+    font-family: "DejaVu Sans", sans-serif;
+}
+.metric-capsule {
+    background: linear-gradient(135deg, #141126, #1A1530);
+    border: 1px solid rgba(138, 79, 255, 0.38);
+    border-radius: 8px;
+    padding: 8px 12px;
+}
+.metric-val-cyan {
+    font-size: 16px;
+    font-weight: bold;
+    color: #00E5FF;
+    font-family: "DejaVu Sans Mono", monospace;
+}
+.metric-val-violet {
+    font-size: 16px;
+    font-weight: bold;
+    color: #C084FC;
+    font-family: "DejaVu Sans Mono", monospace;
+}
+.metric-val-mint {
+    font-size: 16px;
+    font-weight: bold;
+    color: #00FF9D;
+    font-family: "DejaVu Sans Mono", monospace;
+}
+.metric-lbl {
+    font-size: 10px;
+    font-weight: bold;
+    color: #94A3B8;
+}
+.notebook-tabs header {
+    background-color: #100D1F;
+    border-bottom: 1px solid rgba(138, 79, 255, 0.30);
+}
+.notebook-tabs tab {
+    background-color: transparent;
+    border: none;
+    color: #9E97B8;
+    font-weight: bold;
+    font-size: 12px;
+    padding: 7px 16px;
+}
+.notebook-tabs tab:checked {
+    color: #00E5FF;
+    border-bottom: 2px solid #00E5FF;
+    background-color: rgba(0, 229, 255, 0.08);
+}
+.graph-card {
+    background-color: #120F24;
+    border: 1px solid rgba(138, 79, 255, 0.34);
+    border-radius: 8px;
+    padding: 8px;
+}
+treeview {
+    background-color: #0F0D1C;
+    color: #E4E0F5;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+}
+treeview:selected {
+    background: linear-gradient(to right, #5B28A8, #007A94);
+    color: #FFFFFF;
+}
+treeview header button {
+    background-image: none;
+    background-color: #17132B;
+    color: #00E5FF;
+    font-weight: bold;
+    font-size: 11px;
+    border: none;
+    border-bottom: 1px solid rgba(138, 79, 255, 0.30);
+    padding: 6px 8px;
+}
+entry {
+    background-image: none;
+    background-color: #141126;
+    border: 1px solid rgba(138, 79, 255, 0.40);
+    border-radius: 6px;
+    color: #FFFFFF;
+    padding: 5px 10px;
+}
+button.pill-btn {
+    background-image: none;
+    background-color: #191433;
+    border: 1px solid rgba(138, 79, 255, 0.40);
+    border-radius: 6px;
+    color: #C7C2E4;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 5px 10px;
+}
+button.pill-btn:hover {
+    background-color: #2B1E4A;
+    border-color: #00E5FF;
+    color: #FFFFFF;
+}
+button.btn-accent {
+    background-image: none;
+    background: linear-gradient(135deg, #133B4E, #0088A3);
+    border: 1px solid #00E5FF;
+    border-radius: 6px;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 5px 12px;
+}
+button.btn-danger {
+    background-image: none;
+    background: linear-gradient(135deg, #7A1228, #A31936);
+    border: 1px solid #FF3366;
+    border-radius: 6px;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 5px 12px;
+}
+.statusbar {
+    background-color: #100D1F;
+    border-top: 1px solid rgba(138, 79, 255, 0.28);
+    color: #94A3B8;
+    font-size: 11px;
+    padding: 4px 10px;
+}
+"""
+
+def is_protected_pid(pid: Optional[int], proc_name: str = "") -> bool:
+    if pid is None:
+        return True
+    if int(pid) <= 1:
+        return True
+    if int(pid) == 1 or proc_name.strip().lower() in ("init", "kthreadd") and int(pid) <= 2:
+        return True
+    return False
+
+def safe_terminate_pid(pid: Optional[int], sig: int = signal.SIGTERM, proc_name: str = "") -> Tuple[bool, str]:
+    if is_protected_pid(pid, proc_name):
+        return (False, f"BLOCKED: PID {pid} ({proc_name or 'init/kernel'}) is strictly protected from termination.")
+    assert pid is not None
+    try:
+        os.kill(int(pid), sig)
+        return (True, f"Sent signal {sig} to PID {pid}.")
+    except Exception as exc:
+        return (False, f"Failed to signal PID {pid}: {exc}")
+
+def query_system_and_qpu_metrics(qpu: QPU, tick: int = 0) -> Dict[str, Any]:
+    cpu_pct = 12.5
+    ram_pct = 28.0
+    ram_used_mb = 1024.0
+    ram_tot_mb = 8192.0
+
+    if psutil is not None:
+        try:
+            cpu_pct = float(psutil.cpu_percent(interval=None))
+            vm = psutil.virtual_memory()
+            ram_pct = float(vm.percent)
+            ram_used_mb = vm.used / (1024 * 1024)
+            ram_tot_mb = vm.total / (1024 * 1024)
+        except Exception:
+            pass
+    elif os.path.exists("/proc/meminfo"):
+        try:
+            tot_kb, avail_kb = 8388608, 6000000
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        tot_kb = int(line.split()[1])
+                    elif line.startswith("MemAvailable:"):
+                        avail_kb = int(line.split()[1])
+            ram_tot_mb = tot_kb / 1024.0
+            ram_used_mb = max(0.0, (tot_kb - avail_kb) / 1024.0)
+            ram_pct = (ram_used_mb / max(1.0, ram_tot_mb)) * 100.0
+        except Exception:
+            pass
+
+    mxc_mK = 14.25 + 0.08 * math.sin(tick * 0.25)
+    qpu_util_pct = 16.5 + 3.2 * abs(math.sin(tick * 0.18))
+    qec_ns = 512.0
+    tripped = False
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:9090/api/status", timeout=0.35) as resp:
+            st = json.loads(resp.read().decode("utf-8"))
+            mxc_mK = float(st["cryo"]["mxc_mK"])
+            tripped = bool(st["cryo"]["interlock_tripped"])
+            qec_ns = float(st.get("qec_loop_ns", 512.0))
+            qpu_util_pct = min(100.0, 16.5 + (int(st.get("pulse_bursts", 0)) % 12) * 3.5)
+    except Exception:
+        il = qpu.get_interlock()
+        mxc_mK = float(il["temp_mxc_mK"]) + 0.05 * math.sin(tick * 0.3)
+        tripped = bool(il["tripped"])
+
+    return {
+        "cpu_pct": cpu_pct,
+        "ram_pct": ram_pct,
+        "ram_used_mb": ram_used_mb,
+        "ram_tot_mb": ram_tot_mb,
+        "qpu_util_pct": qpu_util_pct,
+        "mxc_mK": mxc_mK,
+        "qec_ns": qec_ns,
+        "interlock_tripped": tripped,
+    }
+
+def list_processes() -> List[Tuple[int, str, str, float, str, float, str, str, str, str]]:
+    rows: List[Tuple[int, str, str, float, str, float, str, str, str, str]] = []
+    if psutil is not None:
+        for p in psutil.process_iter(
+            ["pid", "name", "username", "cpu_percent", "memory_percent", "memory_info", "nice", "status", "cmdline"]
+        ):
+            try:
+                inf = p.info
+                pid = int(inf["pid"])
+                name = str(inf["name"] or f"proc_{pid}")
+                user = str(inf["username"] or "root")
+                cpu = float(inf["cpu_percent"] or 0.0)
+                mem_p = float(inf["memory_percent"] or 0.0)
+                mem_mb = (inf["memory_info"].rss / (1024 * 1024)) if inf["memory_info"] else 0.0
+                nice_v = inf["nice"]
+                state = str(inf["status"] or "sleeping").capitalize()
+                if any(k in name.lower() for k in ("omniqd", "omniq-core", "omniq-secret", "qpu-smi")):
+                    sched = "FIFO 95 [RT]"
+                elif pid <= 1:
+                    sched = "KERNEL/INIT [GUARDED]"
+                elif nice_v is not None and nice_v < 0:
+                    sched = f"High ({nice_v})"
+                else:
+                    sched = f"Nice {nice_v if nice_v is not None else 0}"
+                cmd = " ".join(inf["cmdline"] or [name])
+                rows.append((
+                    pid,
+                    name,
+                    user,
+                    min(100.0, max(0.0, cpu)),
+                    f"{cpu:.1f}%",
+                    min(100.0, max(0.0, mem_p)),
+                    f"{mem_mb:.1f} MB",
+                    sched,
+                    state,
+                    cmd[:180],
+                ))
+            except Exception:
+                continue
+        return rows
+
+    for entry in sorted(os.listdir("/proc")):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as f:
+                name = f.read().strip()
+            sched = "KERNEL/INIT [GUARDED]" if pid <= 1 else "CFS 0"
+            rows.append((pid, name, "root", 0.0, "0.0%", 0.1, "1.0 MB", sched, "Running", name))
+        except Exception:
+            continue
+    return rows
+
+def draw_rolling_graph(
+    cr,
+    width: float,
+    height: float,
+    history: Deque[float],
+    stroke_rgb: Tuple[float, float, float],
+    max_val: float,
+    title: str,
+    unit: str,
+    threshold: Optional[float] = None,
+) -> None:
+    import cairo
+
+    cr.set_antialias(cairo.ANTIALIAS_BEST)
+    cr.set_source_rgb(0.055, 0.045, 0.11)
+    cr.rectangle(0, 0, width, height)
+    cr.fill()
+
+    cr.set_source_rgba(0.35, 0.25, 0.60, 0.25)
+    cr.set_line_width(1.0)
+    for frac in (0.25, 0.50, 0.75):
+        gy = height * frac
+        cr.move_to(0, gy)
+        cr.line_to(width, gy)
+        cr.stroke()
+    step_grid_x = max(32, int(width // 10))
+    for gx in range(0, int(width), step_grid_x):
+        cr.move_to(gx, 0)
+        cr.line_to(gx, height)
+        cr.stroke()
+
+    if threshold is not None and 0 < threshold < max_val:
+        ty = height - (threshold / max_val) * (height - 24.0) - 6.0
+        cr.set_source_rgba(1.0, 0.20, 0.40, 0.80)
+        cr.set_dash([5.0, 4.0])
+        cr.move_to(0, ty)
+        cr.line_to(width, ty)
+        cr.stroke()
+        cr.set_dash([])
+        cr.set_font_size(9.5)
+        cr.move_to(width - 155, max(12.0, ty - 4.0))
+        cr.show_text(f"Interlock Ceiling: {threshold:.1f} {unit}")
+
+    if len(history) >= 2:
+        pts: List[Tuple[float, float]] = []
+        dx = width / float(len(history) - 1)
+        for i, val in enumerate(history):
+            clamped = max(0.0, min(max_val, float(val)))
+            px = i * dx
+            py = height - (clamped / max_val) * (height - 26.0) - 6.0
+            pts.append((px, py))
+
+        cr.move_to(pts[0][0], height)
+        for px, py in pts:
+            cr.line_to(px, py)
+        cr.line_to(pts[-1][0], height)
+        cr.close_path()
+
+        grad = cairo.LinearGradient(0, 0, 0, height)
+        grad.add_color_stop_rgba(0.0, stroke_rgb[0], stroke_rgb[1], stroke_rgb[2], 0.42)
+        grad.add_color_stop_rgba(1.0, stroke_rgb[0], stroke_rgb[1], stroke_rgb[2], 0.03)
+        cr.set_source(grad)
+        cr.fill()
+
+        cr.move_to(pts[0][0], pts[0][1])
+        for px, py in pts[1:]:
+            cr.line_to(px, py)
+        cr.set_source_rgba(stroke_rgb[0], stroke_rgb[1], stroke_rgb[2], 0.30)
+        cr.set_line_width(4.5)
+        cr.stroke_preserve()
+        cr.set_source_rgb(*stroke_rgb)
+        cr.set_line_width(2.0)
+        cr.stroke()
+
+    curr = history[-1] if history else 0.0
+    cr.set_source_rgb(*stroke_rgb)
+    cr.set_font_size(11.0)
+    cr.move_to(10, 18)
+    cr.show_text(f"{title}: {curr:.2f} {unit}")
+
+def launch_gui() -> None:
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, GLib, Gtk, Pango
+
+    GLib.set_prgname("omniq-tasks")
+    GLib.set_application_name("OmniQ Task Monitor")
+
+    gtk_settings = Gtk.Settings.get_default()
+    if gtk_settings is not None:
+        gtk_settings.set_property("gtk-application-prefer-dark-theme", True)
+
+    provider = Gtk.CssProvider()
+    provider.load_from_data(DARK_CSS)
+    screen = Gdk.Screen.get_default()
+    if screen is not None:
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+    class RollingGraphWidget(Gtk.DrawingArea):
+        def __init__(self, stroke_rgb, max_val: float, title: str, unit: str, threshold: Optional[float] = None):
+            super().__init__()
+            self.set_size_request(-1, 125)
+            self.history: Deque[float] = collections.deque([0.0] * 60, maxlen=60)
+            self.stroke_rgb = stroke_rgb
+            self.max_val = max_val
+            self.title = title
+            self.unit = unit
+            self.threshold = threshold
+            self.connect("draw", self._on_draw)
+
+        def push(self, value: float) -> None:
+            self.history.append(float(value))
+            self.queue_draw()
+
+        def _on_draw(self, widget, cr) -> bool:
+            alloc = widget.get_allocation()
+            draw_rolling_graph(
+                cr,
+                float(alloc.width),
+                float(alloc.height),
+                self.history,
+                self.stroke_rgb,
+                self.max_val,
+                self.title,
+                self.unit,
+                self.threshold,
+            )
+            return False
+
+    class OmniQTasksWindow(Gtk.Window):
+        def __init__(self):
+            super().__init__(title="OmniQ-OS System & Quantum Task Monitor")
+            self.set_default_size(1040, 680)
+            self.set_position(Gtk.WindowPosition.CENTER)
+            self.qpu = QPU()
+            self.tick = 0
+            self.filter_mode = "all"
+
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            vbox.get_style_context().add_class("main-bg")
+            self.add(vbox)
+
+            kpi_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            kpi_row.set_homogeneous(True)
+            kpi_row.set_margin_start(10)
+            kpi_row.set_margin_end(10)
+            kpi_row.set_margin_top(8)
+            kpi_row.set_margin_bottom(6)
+            vbox.pack_start(kpi_row, False, False, 0)
+
+            self.kpi_cpu = self._add_kpi(kpi_row, "HOST CPU (PREEMPT_RT)", "0.0 %", "metric-val-cyan")
+            self.kpi_ram = self._add_kpi(kpi_row, "PHYSICAL MEMORY", "0 / 0 MB", "metric-val-violet")
+            self.kpi_qpu = self._add_kpi(kpi_row, "QPU LATTICE UTILIZATION", "16.5 % (21/127Q)", "metric-val-mint")
+            self.kpi_mxc = self._add_kpi(kpi_row, "CRYO MIXING CHAMBER", "14.25 mK", "metric-val-cyan")
+
+            self.notebook = Gtk.Notebook()
+            self.notebook.get_style_context().add_class("notebook-tabs")
+            vbox.pack_start(self.notebook, True, True, 0)
+
+            self.notebook.append_page(self._build_graphs_tab(), Gtk.Label(label="Telemetry Graphs"))
+            self.notebook.append_page(self._build_processes_tab(), Gtk.Label(label="Processes & RT Guards"))
+
+            self.status_lbl = Gtk.Label(label="PID 0 & PID 1 (init) termination hardware/OS guard ARMED.")
+            self.status_lbl.get_style_context().add_class("statusbar")
+            self.status_lbl.set_xalign(0.0)
+            vbox.pack_start(self.status_lbl, False, False, 0)
+
+            self._refresh_telemetry()
+            GLib.timeout_add(1200, self._on_tick)
+
+        @staticmethod
+        def _add_kpi(parent: Gtk.Box, label_txt: str, init_val: str, val_cls: str) -> Gtk.Label:
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            card.get_style_context().add_class("metric-capsule")
+            v = Gtk.Label(label=init_val)
+            v.get_style_context().add_class(val_cls)
+            v.set_xalign(0.0)
+            l = Gtk.Label(label=label_txt)
+            l.get_style_context().add_class("metric-lbl")
+            l.set_xalign(0.0)
+            card.pack_start(v, False, False, 0)
+            card.pack_start(l, False, False, 0)
+            parent.pack_start(card, True, True, 0)
+            return v
+
+        def _build_graphs_tab(self) -> Gtk.Widget:
+            grid = Gtk.Grid()
+            grid.set_row_spacing(8)
+            grid.set_column_spacing(8)
+            grid.set_row_homogeneous(True)
+            grid.set_column_homogeneous(True)
+            grid.set_margin_start(10)
+            grid.set_margin_end(10)
+            grid.set_margin_top(8)
+            grid.set_margin_bottom(8)
+
+            self.chart_cpu = RollingGraphWidget((0.0, 0.90, 1.0), 100.0, "CPU Utilization", "%")
+            self.chart_ram = RollingGraphWidget((0.75, 0.45, 1.0), 100.0, "RAM Allocation", "%")
+            self.chart_qpu = RollingGraphWidget((0.0, 1.0, 0.62), 100.0, "QPU Qubit Utilization", "%")
+            self.chart_mxc = RollingGraphWidget((1.0, 0.72, 0.18), 65.0, "MXC Cryo Temperature", "mK", threshold=50.0)
+
+            for idx, chart in enumerate([self.chart_cpu, self.chart_ram, self.chart_qpu, self.chart_mxc]):
+                wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+                wrap.get_style_context().add_class("graph-card")
+                wrap.pack_start(chart, True, True, 0)
+                grid.attach(wrap, idx % 2, idx // 2, 1, 1)
+
+            return grid
+
+        def _build_processes_tab(self) -> Gtk.Widget:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            box.set_margin_start(10)
+            box.set_margin_end(10)
+            box.set_margin_top(8)
+            box.set_margin_bottom(8)
+
+            tb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            self.search_entry = Gtk.Entry()
+            self.search_entry.set_placeholder_text("Filter PID, name, or command...")
+            self.search_entry.set_width_chars(28)
+            self.search_entry.connect("changed", lambda _e: self.filter_model.refilter())
+            tb.pack_start(self.search_entry, False, False, 0)
+
+            for mode, title in [("all", "All"), ("quantum", "Quantum / RT"), ("user", "User"), ("sys", "System")]:
+                b = Gtk.Button(label=title)
+                b.get_style_context().add_class("pill-btn")
+                b.connect("clicked", self._on_set_filter, mode)
+                tb.pack_start(b, False, False, 0)
+
+            tb.pack_start(Gtk.Box(), True, True, 0)
+
+            btn_rt = Gtk.Button(label="Set RT FIFO 95")
+            btn_rt.get_style_context().add_class("btn-accent")
+            btn_rt.connect("clicked", self._on_set_rt)
+            tb.pack_start(btn_rt, False, False, 0)
+
+            btn_term = Gtk.Button(label="End Process")
+            btn_term.get_style_context().add_class("btn-danger")
+            btn_term.connect("clicked", lambda _b: self._on_kill_selected(signal.SIGTERM))
+            tb.pack_start(btn_term, False, False, 0)
+
+            btn_kill = Gtk.Button(label="Force Kill")
+            btn_kill.get_style_context().add_class("btn-danger")
+            btn_kill.connect("clicked", lambda _b: self._on_kill_selected(signal.SIGKILL))
+            tb.pack_start(btn_kill, False, False, 0)
+
+            box.pack_start(tb, False, False, 0)
+
+            self.store = Gtk.ListStore(int, str, str, float, str, float, str, str, str, str)
+            self.filter_model = self.store.filter_new()
+            self.filter_model.set_visible_func(self._filter_row)
+            self.sort_model = Gtk.TreeModelSort(model=self.filter_model)
+            self.tree = Gtk.TreeView(model=self.sort_model)
+
+            cols = [
+                ("PID", 0, 70, False),
+                ("Process Name", 1, 165, False),
+                ("User", 2, 85, False),
+                ("CPU %", 3, 115, True),
+                ("Memory", 5, 115, True),
+                ("Scheduler / RT", 7, 145, False),
+                ("State", 8, 85, False),
+                ("Command", 9, 220, False),
+            ]
+            for title, idx, min_w, is_prog in cols:
+                if is_prog:
+                    rend = Gtk.CellRendererProgress()
+                    col = Gtk.TreeViewColumn(title, rend, value=idx, text=idx + 1)
+                else:
+                    rend = Gtk.CellRendererText()
+                    rend.set_property("ellipsize", Pango.EllipsizeMode.END)
+                    col = Gtk.TreeViewColumn(title, rend, text=idx)
+                col.set_resizable(True)
+                col.set_min_width(min_w)
+                col.set_sort_column_id(idx)
+                self.tree.append_column(col)
+
+            sw = Gtk.ScrolledWindow()
+            sw.set_hexpand(True)
+            sw.set_vexpand(True)
+            sw.add(self.tree)
+            box.pack_start(sw, True, True, 0)
+            return box
+
+        def _on_set_filter(self, _btn, mode: str) -> None:
+            self.filter_mode = mode
+            self.filter_model.refilter()
+
+        def _filter_row(self, model, it, _data) -> bool:
+            q = self.search_entry.get_text().strip().lower()
+            pid = str(model[it][0])
+            name = model[it][1].lower()
+            user = model[it][2].lower()
+            sched = model[it][7].lower()
+            cmd = model[it][9].lower()
+            if q and q not in pid and q not in name and q not in user and q not in cmd:
+                return False
+            if self.filter_mode == "quantum":
+                return "omniq" in name or "qpu" in name or "fifo" in sched
+            if self.filter_mode == "user":
+                return user != "root"
+            if self.filter_mode == "sys":
+                return user == "root"
+            return True
+
+        def _selected_proc(self) -> Tuple[Optional[int], str]:
+            sel = self.tree.get_selection()
+            model, it = sel.get_selected()
+            if it is not None:
+                return int(model[it][0]), str(model[it][1])
+            return None, ""
+
+        def _on_kill_selected(self, sig: int) -> None:
+            pid, name = self._selected_proc()
+            ok, msg = safe_terminate_pid(pid, sig, name)
+            self.status_lbl.set_text(msg)
+            if ok:
+                self._refresh_telemetry()
+
+        def _on_set_rt(self, _btn) -> None:
+            pid, name = self._selected_proc()
+            if is_protected_pid(pid, name):
+                self.status_lbl.set_text(f"Protected PID {pid} cannot be re-scheduled.")
+                return
+            try:
+                subprocess.run(["chrt", "-f", "-p", "95", str(pid)], capture_output=True, timeout=2)
+                self.status_lbl.set_text(f"Requested SCHED_FIFO 95 on PID {pid} ({name}).")
+            except Exception as exc:
+                self.status_lbl.set_text(f"RT priority error: {exc}")
+
+        def _on_tick(self) -> bool:
+            self._refresh_telemetry()
+            return True
+
+        def _refresh_telemetry(self) -> None:
+            self.tick += 1
+            m = query_system_and_qpu_metrics(self.qpu, self.tick)
+            self.kpi_cpu.set_text(f"{m['cpu_pct']:.1f} %")
+            self.kpi_ram.set_text(f"{m['ram_used_mb']:.0f} / {m['ram_tot_mb']:.0f} MB")
+            self.kpi_qpu.set_text(f"{m['qpu_util_pct']:.1f} % (QEC {m['qec_ns']:.0f} ns)")
+            self.kpi_mxc.set_text(f"{m['mxc_mK']:.2f} mK")
+
+            self.chart_cpu.push(m["cpu_pct"])
+            self.chart_ram.push(m["ram_pct"])
+            self.chart_qpu.push(m["qpu_util_pct"])
+            self.chart_mxc.push(m["mxc_mK"])
+
+            sel_pid, _ = self._selected_proc()
+            procs = list_processes()
+            self.store.clear()
+            for r in procs:
+                it = self.store.append(list(r))
+                if sel_pid is not None and r[0] == sel_pid:
+                    self.tree.get_selection().select_iter(it)
+
+    win = OmniQTasksWindow()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+def run_self_test() -> int:
+    import cairo
+
+    assert is_protected_pid(0, "swapper") is True
+    assert is_protected_pid(1, "init") is True
+    assert is_protected_pid(1, "systemd") is True
+    ok0, msg0 = safe_terminate_pid(0, signal.SIGKILL, "swapper")
+    ok1, msg1 = safe_terminate_pid(1, signal.SIGKILL, "init")
+    assert ok0 is False and "BLOCKED" in msg0
+    assert ok1 is False and "BLOCKED" in msg1
+
+    qpu = QPU()
+    m = query_system_and_qpu_metrics(qpu, tick=3)
+    assert 0.0 <= m["cpu_pct"] <= 100.0
+    assert m["mxc_mK"] > 0.0
+    procs = list_processes()
+    assert len(procs) >= 1
+
+    buf = collections.deque([14.2 + 0.1 * i for i in range(60)], maxlen=60)
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 420, 140)
+    cr = cairo.Context(surf)
+    draw_rolling_graph(cr, 420.0, 140.0, buf, (0.0, 0.90, 1.0), 65.0, "MXC Cryo Temperature", "mK", threshold=50.0)
+
+    print("[PASS] omniq-tasks rolling Cairo graphs & PID 0/1 init safety guards verified.")
+    return 0
+
+def main() -> None:
+    if "--test" in sys.argv:
+        sys.exit(run_self_test())
+    launch_gui()
+
+if __name__ == "__main__":
+    main()

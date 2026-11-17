@@ -1,8 +1,3 @@
-# SPDX-License-Identifier: GPL-2.0
-#
-# OmniQ-OS Kbuild configuration for drivers/accel/qpu/
-#
-
 obj-m += omniq_qpu.o
 
 omniq_qpu-y := \
@@ -15,5 +10,5 @@ omniq_qpu-y := \
 	qpu_keepalive.o \
 	qpu_fallback.o
 
-ccflags-y += -I$(src)/../../include/uapi
+ccflags-y += -I$(src)/../../../include/uapi
 

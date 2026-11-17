@@ -1,0 +1,105 @@
+#!/bin/sh
+
+if [ "${1:-}" = "--test" ]; then
+    sh -n "$0" && echo "[+] omniq-desktop-start syntax OK"
+    exit 0
+fi
+
+export DISPLAY=${DISPLAY:-:0}
+export PATH=/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin
+export LD_LIBRARY_PATH=/usr/local/lib:/opt/omniq/lib:/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu
+export HOME=${HOME:-/root}
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+export QT_QPA_PLATFORM=xcb
+export QT_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/qt5/plugins
+export QT_X11_NO_MITSHM=1
+
+echo "================================================================="
+echo "   OmniQ-OS (Real-Time Quantum Linux) - X11 Desktop Start"
+echo "================================================================="
+
+mkdir -p /dev/pts /dev/shm /dev/accel /tmp/runtime-root /var/log /var/log/omniq /tmp /var/run /tmp/.X11-unix /root/circuits
+chmod 700 /tmp/runtime-root 2>/dev/null || true
+chmod 1777 /tmp /tmp/.X11-unix 2>/dev/null || true
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts -o gid=5,mode=620,ptmxmode=666 2>/dev/null || true
+mountpoint -q /dev/shm || mount -t tmpfs tmpfs /dev/shm -o mode=1777 2>/dev/null || true
+[ -c /dev/ptmx ] || mknod -m 666 /dev/ptmx c 5 2 2>/dev/null || true
+[ -c /dev/accel/qpu0 ] || mknod -m 660 /dev/accel/qpu0 c 241 0 2>/dev/null || true
+chmod 666 /dev/ptmx 2>/dev/null || true
+
+if ! pgrep -x omniqd >/dev/null 2>&1; then
+    for d_bin in /usr/local/bin/omniqd /usr/bin/omniqd /bin/omniqd; do
+        if [ -x "$d_bin" ]; then
+            echo "[*] Spawning OmniQ Quantum Daemon (SCHED_FIFO 95)..."
+            "$d_bin" 9090 >/var/log/omniq/omniqd.log 2>&1 &
+            break
+        fi
+    done
+fi
+
+for mod in vmwgfx fbdev bochs-drm virtio_gpu \
+           usbcore xhci-pci ehci-pci ohci-pci \
+           usbhid hid-generic psmouse mousedev evdev serio_raw joydev uinput; do
+    modprobe "$mod" 2>/dev/null || true
+done
+mdev -s 2>/dev/null || true
+
+mkdir -p /var/run/dbus /run/dbus /var/lib/dbus
+[ ! -f /var/lib/dbus/machine-id ] && dbus-uuidgen --ensure 2>/dev/null || true
+[ ! -f /etc/machine-id ] && [ -f /var/lib/dbus/machine-id ] && cp -a /var/lib/dbus/machine-id /etc/machine-id 2>/dev/null || true
+if ! pgrep -x dbus-daemon >/dev/null 2>&1 && [ -x /usr/bin/dbus-daemon ]; then
+    /usr/bin/dbus-daemon --system --fork 2>/dev/null || true
+fi
+
+if [ -n "$DISPLAY" ] && xset q >/dev/null 2>&1; then
+    echo "[+] Active X11 display detected on $DISPLAY. Launching OmniQ Desktop..."
+    if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-launch >/dev/null 2>&1; then
+        eval $(dbus-launch --sh-syntax --exit-with-session)
+        export DBUS_SESSION_BUS_ADDRESS
+        export DBUS_SESSION_BUS_PID
+    fi
+    if [ -x /usr/local/bin/omniq-compositor ]; then
+        /usr/local/bin/omniq-compositor start >/var/log/omniq/compositor-start.log 2>&1 &
+    fi
+    if [ -x /usr/local/bin/omniq-desktop-backdrop ] && ! pgrep -f omniq-desktop-backdrop >/dev/null 2>&1; then
+        /usr/local/bin/omniq-desktop-backdrop >/var/log/omniq/desktop-backdrop.log 2>&1 &
+    fi
+    exec /usr/bin/jwm -f /etc/jwm/system.jwmrc
+fi
+
+XORG_BIN=""
+for candidate in /usr/lib/xorg/Xorg /usr/bin/Xorg /usr/bin/X; do
+    if [ -x "$candidate" ]; then
+        XORG_BIN="$candidate"
+        break
+    fi
+done
+
+if [ -z "$XORG_BIN" ]; then
+    echo "[!] Xorg display server binary not found; dropping to interactive shell."
+    exec /bin/bash --login
+fi
+
+XINIT_RC="/etc/X11/xinit/xinitrc"
+if [ ! -f "$XINIT_RC" ]; then
+    XINIT_RC="$HOME/.xinitrc"
+fi
+
+echo "[*] Initializing X11 Display Server on :0 (VT1) with MIT-MAGIC-COOKIE xauth..."
+XAUTH_FILE="${XAUTHORITY:-$HOME/.Xauthority}"
+touch "$XAUTH_FILE"
+COOKIE=$(mcookie 2>/dev/null || od -An -N16 -tx /dev/urandom | tr -d ' ')
+if [ -n "$COOKIE" ] && command -v xauth >/dev/null 2>&1; then
+    xauth -f "$XAUTH_FILE" add :0 . "$COOKIE" 2>/dev/null || true
+    xauth -f "$XAUTH_FILE" add 127.0.0.1:0 . "$COOKIE" 2>/dev/null || true
+fi
+export XAUTHORITY="$XAUTH_FILE"
+
+xinit "$XINIT_RC" -- "$XORG_BIN" :0 vt1 -keeptty -auth "$XAUTH_FILE" -logfile /var/log/Xorg.0.log
+
+EXIT_CODE=$?
+echo "[!] Xorg session ended with exit code $EXIT_CODE"
+if [ -f /var/log/Xorg.0.log ]; then
+    echo "--- Last 25 lines of /var/log/Xorg.0.log ---"
+    tail -n 25 /var/log/Xorg.0.log 2>/dev/null || true
+fi

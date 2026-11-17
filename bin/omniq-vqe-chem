@@ -1,0 +1,634 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import shutil
+import subprocess
+import sys
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+for _p in reversed([
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    "/opt/omniq/src",
+    "/usr/lib/python3/dist-packages",
+]):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from omniq.chem import MolecularHamiltonian, VQESolver, compute_dissociation_curve
+from omniq.optimization import QAOA
+
+IPC_HILBERT_PATH = "/tmp/omniq_hilbert_state.json"
+
+DARK_CSS = b"""
+window, .main-bg {
+    background-color: #0D0B18;
+    color: #ECF2FF;
+    font-family: "DejaVu Sans", sans-serif;
+}
+.header-bar {
+    background: linear-gradient(to right, #110E22, #1A1530);
+    border-bottom: 1px solid rgba(0, 229, 255, 0.35);
+    padding: 8px 12px;
+}
+.panel-card {
+    background-color: #141126;
+    border: 1px solid rgba(138, 79, 255, 0.38);
+    border-radius: 8px;
+}
+button {
+    background-image: none;
+    background-color: #1A1530;
+    color: #E2E8F0;
+    border: 1px solid rgba(138, 79, 255, 0.42);
+    border-radius: 6px;
+    padding: 6px 11px;
+    font-size: 11px;
+    font-weight: bold;
+}
+button:hover {
+    background-color: #261E47;
+    border-color: #00E5FF;
+    color: #00E5FF;
+}
+button.accent-btn {
+    background: linear-gradient(135deg, #0E4B63, #008CA8);
+    border-color: #00E5FF;
+    color: #FFFFFF;
+}
+button.accent-btn:hover {
+    background: #00E5FF;
+    color: #0D0B18;
+}
+button.violet-btn {
+    background: linear-gradient(135deg, #2D1957, #5B28A8);
+    border-color: #8A4FFF;
+    color: #FFFFFF;
+}
+combobox button, spinbutton {
+    background-image: none;
+    background-color: #141126;
+    color: #ECF2FF;
+    border: 1px solid rgba(138, 79, 255, 0.42);
+    border-radius: 6px;
+}
+scale trough {
+    background-color: #211B3D;
+    border-radius: 4px;
+}
+scale highlight {
+    background: linear-gradient(to right, #8A4FFF, #00E5FF);
+    border-radius: 4px;
+}
+.title-lbl {
+    color: #00E5FF;
+    font-weight: bold;
+    font-size: 13px;
+}
+.sub-lbl {
+    color: #94A3B8;
+    font-size: 11px;
+}
+.metric-val {
+    color: #00FF9D;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+    font-weight: bold;
+}
+.ham-view, .ham-view text {
+    background-color: #090812;
+    color: #C7D2FE;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+}
+"""
+
+QAOA_GRAPHS: Dict[str, Tuple[int, List[Tuple[int, int]]]] = {
+    "ring4": (4, [(0, 1), (1, 2), (2, 3), (3, 0)]),
+    "butterfly5": (5, [(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 2)]),
+    "prism6": (6, [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (0, 3), (1, 4), (2, 5)]),
+}
+
+def build_molecule(molecule: str, bond_a: float) -> MolecularHamiltonian:
+    m = molecule.upper()
+    if m == "LIH":
+        return MolecularHamiltonian.lih(bond_a)
+    if m == "BEH2":
+        return MolecularHamiltonian.beh2(bond_a)
+    return MolecularHamiltonian.h2(bond_a)
+
+def draw_pes_and_convergence(
+    cr,
+    width: float,
+    height: float,
+    molecule: str,
+    bond_a: float,
+    pes_data: Dict[str, List[float]],
+    vqe_run: Dict[str, Any],
+    qaoa_res: Optional[Dict[str, Any]] = None,
+    qaoa_edges: Optional[Sequence[Tuple[int, int]]] = None,
+    qaoa_nq: int = 4,
+) -> None:
+    import cairo
+
+    cr.set_antialias(cairo.ANTIALIAS_BEST)
+    cr.set_source_rgb(0.05, 0.04, 0.10)
+    cr.rectangle(0, 0, width, height)
+    cr.fill()
+
+    pad = 10.0
+    top_h = (height - 3.0 * pad) * 0.52
+    bot_y = 2.0 * pad + top_h
+    bot_h = height - bot_y - pad
+
+    cr.set_source_rgba(0.08, 0.07, 0.16, 0.96)
+    cr.rectangle(pad, pad, width - 2 * pad, top_h)
+    cr.fill()
+    cr.set_source_rgba(0.54, 0.31, 1.0, 0.45)
+    cr.set_line_width(1.0)
+    cr.rectangle(pad, pad, width - 2 * pad, top_h)
+    cr.stroke()
+
+    cr.set_source_rgb(0.0, 0.90, 1.0)
+    cr.set_font_size(11.5)
+    cr.move_to(pad + 12, pad + 20)
+    cr.show_text(
+        f"{molecule.upper()} POTENTIAL ENERGY SURFACE (PES) DISSOCIATION CURVE  [R = {bond_a:.3f} A]"
+    )
+
+    radii = pes_data.get("radii_angstrom", [])
+    fci_e = pes_data.get("fci_energies", [])
+    vqe_e = pes_data.get("vqe_energies", [])
+
+    if len(radii) >= 2 and fci_e and vqe_e:
+        px0 = pad + 62.0
+        px1 = width - pad - 24.0
+        py0 = pad + 34.0
+        py1 = pad + top_h - 28.0
+        pw = max(40.0, px1 - px0)
+        ph = max(40.0, py1 - py0)
+
+        r_min, r_max = min(radii), max(radii)
+        e_all = fci_e + vqe_e
+        e_min = min(e_all) - 0.03
+        e_max = max(e_all) + 0.03
+        e_span = max(1e-5, e_max - e_min)
+
+        def map_pt(r_val: float, e_val: float) -> Tuple[float, float]:
+            tx = (r_val - r_min) / max(1e-6, r_max - r_min)
+            ty = (e_val - e_min) / e_span
+            return (px0 + tx * pw, py1 - ty * ph)
+
+        cr.set_font_size(9.0)
+        for frac in (0.0, 0.5, 1.0):
+            gy = py1 - frac * ph
+            eval_lbl = e_min + frac * e_span
+            cr.set_source_rgba(0.35, 0.30, 0.58, 0.28)
+            cr.move_to(px0, gy)
+            cr.line_to(px1, gy)
+            cr.stroke()
+            cr.set_source_rgb(0.70, 0.78, 0.92)
+            cr.move_to(pad + 8, gy + 3)
+            cr.show_text(f"{eval_lbl:.2f}")
+
+        for r_tick in (0.5, 1.0, 1.5, 2.0, 2.5):
+            if r_min <= r_tick <= r_max:
+                gx, _ = map_pt(r_tick, e_min)
+                cr.set_source_rgb(0.70, 0.78, 0.92)
+                cr.move_to(gx - 10, py1 + 14)
+                cr.show_text(f"{r_tick:.1f} A")
+
+        cx_bond, _ = map_pt(max(r_min, min(r_max, bond_a)), e_min)
+        cr.set_source_rgba(1.0, 0.25, 0.45, 0.65)
+        cr.set_dash([4.0, 4.0])
+        cr.move_to(cx_bond, py0)
+        cr.line_to(cx_bond, py1)
+        cr.stroke()
+        cr.set_dash([])
+
+        cr.set_source_rgb(0.0, 0.90, 1.0)
+        cr.set_line_width(2.2)
+        for i, (rv, ev) in enumerate(zip(radii, fci_e)):
+            x, y = map_pt(rv, ev)
+            if i == 0:
+                cr.move_to(x, y)
+            else:
+                cr.line_to(x, y)
+        cr.stroke()
+
+        cr.set_source_rgb(0.0, 1.0, 0.62)
+        cr.set_line_width(1.6)
+        cr.set_dash([6.0, 3.0])
+        for i, (rv, ev) in enumerate(zip(radii, vqe_e)):
+            x, y = map_pt(rv, ev)
+            if i == 0:
+                cr.move_to(x, y)
+            else:
+                cr.line_to(x, y)
+        cr.stroke()
+        cr.set_dash([])
+        for rv, ev in zip(radii, vqe_e):
+            x, y = map_pt(rv, ev)
+            cr.arc(x, y, 3.2, 0, 2 * math.pi)
+            cr.fill()
+
+        cur_e = float(vqe_run.get("vqe_energy_hartree", fci_e[0]))
+        bx_pt, by_pt = map_pt(max(r_min, min(r_max, bond_a)), cur_e)
+        cr.set_source_rgb(1.0, 0.25, 0.45)
+        cr.arc(bx_pt, by_pt, 5.2, 0, 2 * math.pi)
+        cr.fill()
+
+        cr.set_font_size(9.5)
+        cr.set_source_rgb(0.0, 0.90, 1.0)
+        cr.move_to(px1 - 245, pad + 20)
+        cr.show_text("Solid Cyan: Exact FCI")
+        cr.set_source_rgb(0.0, 1.0, 0.62)
+        cr.move_to(px1 - 118, pad + 20)
+        cr.show_text("Dots: VQE Ansatz")
+
+    conv_w = (width - 3.0 * pad) * 0.60
+    cr.set_source_rgba(0.08, 0.07, 0.16, 0.96)
+    cr.rectangle(pad, bot_y, conv_w, bot_h)
+    cr.fill()
+    cr.set_source_rgba(0.54, 0.31, 1.0, 0.45)
+    cr.rectangle(pad, bot_y, conv_w, bot_h)
+    cr.stroke()
+
+    cr.set_source_rgb(0.0, 1.0, 0.62)
+    cr.set_font_size(11.0)
+    cr.move_to(pad + 12, bot_y + 19)
+    de_mha = float(vqe_run.get("chemical_accuracy_mHa", 0.0))
+    cr.show_text(f"PARAMETER-SHIFT CONVERGENCE  (|E_VQE - E_FCI| = {de_mha:.3f} mHa)")
+
+    hist: List[float] = list(vqe_run.get("energy_history", []))
+    exact_ref = float(vqe_run.get("exact_fci_hartree", hist[-1] if hist else -1.0))
+    if len(hist) >= 2:
+        cx0 = pad + 58.0
+        cx1 = pad + conv_w - 16.0
+        cy0 = bot_y + 32.0
+        cy1 = bot_y + bot_h - 22.0
+        cw = max(30.0, cx1 - cx0)
+        ch = max(30.0, cy1 - cy0)
+        lo = min(min(hist), exact_ref) - 0.01
+        hi = max(max(hist), exact_ref) + 0.01
+        span = max(1e-5, hi - lo)
+
+        y_fci = cy1 - ((exact_ref - lo) / span) * ch
+        cr.set_source_rgba(0.0, 0.90, 1.0, 0.70)
+        cr.set_dash([5.0, 4.0])
+        cr.move_to(cx0, y_fci)
+        cr.line_to(cx1, y_fci)
+        cr.stroke()
+        cr.set_dash([])
+
+        cr.set_source_rgb(0.75, 0.45, 1.0)
+        cr.set_line_width(2.2)
+        for k, ev in enumerate(hist):
+            kx = cx0 + (k / float(len(hist) - 1)) * cw
+            ky = cy1 - ((ev - lo) / span) * ch
+            if k == 0:
+                cr.move_to(kx, ky)
+            else:
+                cr.line_to(kx, ky)
+        cr.stroke()
+
+    qx0 = 2.0 * pad + conv_w
+    qw = width - qx0 - pad
+    cr.set_source_rgba(0.08, 0.07, 0.16, 0.96)
+    cr.rectangle(qx0, bot_y, qw, bot_h)
+    cr.fill()
+    cr.set_source_rgba(0.54, 0.31, 1.0, 0.45)
+    cr.rectangle(qx0, bot_y, qw, bot_h)
+    cr.stroke()
+
+    cr.set_source_rgb(0.75, 0.45, 1.0)
+    cr.set_font_size(11.0)
+    cr.move_to(qx0 + 10, bot_y + 19)
+    if qaoa_res:
+        cr.show_text(
+            f"QAOA MAXCUT: Cut={qaoa_res['best_cut_value']} (|x*>={qaoa_res['best_bitstring']})"
+        )
+    else:
+        cr.show_text("QAOA COMBINATORIAL MAXCUT")
+
+    if qaoa_edges and qaoa_res:
+        bstr = str(qaoa_res["best_bitstring"])
+        gcx = qx0 + qw * 0.5
+        gcy = bot_y + 24.0 + (bot_h - 28.0) * 0.5
+        grad = min(qw, bot_h - 36.0) * 0.33
+        pts = [
+            (
+                gcx + grad * math.cos(2.0 * math.pi * i / qaoa_nq - math.pi / 2.0),
+                gcy + grad * math.sin(2.0 * math.pi * i / qaoa_nq - math.pi / 2.0),
+            )
+            for i in range(qaoa_nq)
+        ]
+        for u, v in qaoa_edges:
+            if u < qaoa_nq and v < qaoa_nq:
+                bu = bstr[-1 - u]
+                bv = bstr[-1 - v]
+                if bu != bv:
+                    cr.set_source_rgba(0.0, 1.0, 0.62, 0.90)
+                    cr.set_line_width(2.4)
+                else:
+                    cr.set_source_rgba(0.5, 0.55, 0.7, 0.35)
+                    cr.set_line_width(1.2)
+                cr.move_to(*pts[u])
+                cr.line_to(*pts[v])
+                cr.stroke()
+
+        for i, (nx, ny) in enumerate(pts):
+            bit = bstr[-1 - i]
+            if bit == "1":
+                cr.set_source_rgb(0.54, 0.31, 1.0)
+            else:
+                cr.set_source_rgb(0.0, 0.85, 0.98)
+            cr.arc(nx, ny, 12.0, 0, 2 * math.pi)
+            cr.fill()
+            cr.set_source_rgb(1.0, 1.0, 1.0)
+            cr.set_font_size(9.5)
+            cr.move_to(nx - 6.0, ny + 3.5)
+            cr.show_text(f"q{i}")
+
+def resolve_sibling_bin(name: str) -> str:
+    local = os.path.join(REPO_ROOT, "bin", name)
+    if os.path.isfile(local):
+        return local
+    for p in [f"/usr/local/bin/{name}", f"/usr/bin/{name}"]:
+        if os.path.isfile(p):
+            return p
+    return shutil.which(name) or local
+
+def launch_gui() -> None:
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, GLib, Gtk
+
+    GLib.set_prgname("omniq-vqe-chem")
+    GLib.set_application_name("OmniQ VQE Chemistry & QAOA Workbench")
+
+    gtk_settings = Gtk.Settings.get_default()
+    if gtk_settings is not None:
+        gtk_settings.set_property("gtk-application-prefer-dark-theme", True)
+
+    provider = Gtk.CssProvider()
+    provider.load_from_data(DARK_CSS)
+    screen = Gdk.Screen.get_default()
+    if screen is not None:
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+    class OmniQVQEWindow(Gtk.Window):
+        def __init__(self):
+            super().__init__(title="OmniQ VQE & QAOA - Molecular Quantum Chemistry & Optimization Workbench")
+            self.set_default_size(1180, 720)
+            self.set_position(Gtk.WindowPosition.CENTER)
+
+            self.molecule = "H2"
+            self.bond_length = 0.735
+            self.pes_cache: Dict[str, Dict[str, List[float]]] = {}
+            self.vqe_result: Dict[str, Any] = {}
+            self.qaoa_graph_id = "ring4"
+            self.qaoa_result: Dict[str, Any] = {}
+
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            vbox.get_style_context().add_class("main-bg")
+            self.add(vbox)
+
+            hdr = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            hdr.get_style_context().add_class("header-bar")
+
+            hdr.pack_start(Gtk.Label(label="Molecule:"), False, False, 0)
+            self.mol_combo = Gtk.ComboBoxText()
+            self.mol_combo.append("H2", "H2 (STO-3G, 2 Qubits, R_eq=0.735 A)")
+            self.mol_combo.append("LiH", "LiH (Active-4Q, R_eq=1.595 A)")
+            self.mol_combo.append("BeH2", "BeH2 (Active-4Q, R_eq=1.326 A)")
+            self.mol_combo.set_active_id("H2")
+            self.mol_combo.connect("changed", self._on_molecule_changed)
+            hdr.pack_start(self.mol_combo, False, False, 0)
+
+            hdr.pack_start(Gtk.Label(label="Bond R (0.4..2.6 A):"), False, False, 0)
+            self.bond_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0.40, 2.60, 0.05)
+            self.bond_scale.set_value(0.735)
+            self.bond_scale.set_size_request(190, -1)
+            self.bond_scale.connect("value-changed", self._on_bond_changed)
+            hdr.pack_start(self.bond_scale, False, False, 0)
+
+            btn_vqe = Gtk.Button(label="Run VQE Optimizer")
+            btn_vqe.get_style_context().add_class("accent-btn")
+            btn_vqe.connect("clicked", lambda _b: self._recompute_vqe())
+            hdr.pack_start(btn_vqe, False, False, 0)
+
+            hdr.pack_start(Gtk.Label(label="QAOA Graph:"), False, False, 4)
+            self.qaoa_combo = Gtk.ComboBoxText()
+            self.qaoa_combo.append("ring4", "4-Node Ring")
+            self.qaoa_combo.append("butterfly5", "5-Node Butterfly")
+            self.qaoa_combo.append("prism6", "6-Node Prism")
+            self.qaoa_combo.set_active_id("ring4")
+            self.qaoa_combo.connect("changed", self._on_qaoa_changed)
+            hdr.pack_start(self.qaoa_combo, False, False, 0)
+
+            btn_export = Gtk.Button(label="Open Ansatz in Hilbert Space")
+            btn_export.get_style_context().add_class("violet-btn")
+            btn_export.connect("clicked", self._on_export_ansatz)
+            hdr.pack_end(btn_export, False, False, 0)
+
+            vbox.pack_start(hdr, False, False, 0)
+
+            body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            body.set_margin_start(8)
+            body.set_margin_end(8)
+            body.set_margin_top(8)
+            body.set_margin_bottom(8)
+            vbox.pack_start(body, True, True, 0)
+
+            plot_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            plot_card.get_style_context().add_class("panel-card")
+            self.canvas = Gtk.DrawingArea()
+            self.canvas.connect("draw", self._on_draw)
+            plot_card.pack_start(self.canvas, True, True, 0)
+            body.pack_start(plot_card, True, True, 0)
+
+            right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            right.set_size_request(310, -1)
+            right.get_style_context().add_class("panel-card")
+            rin = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            rin.set_margin_start(10)
+            rin.set_margin_end(10)
+            rin.set_margin_top(10)
+            rin.set_margin_bottom(10)
+            right.pack_start(rin, True, True, 0)
+
+            ehdr = Gtk.Label(label="ELECTRONIC STRUCTURE METRICS")
+            ehdr.get_style_context().add_class("title-lbl")
+            ehdr.set_xalign(0.0)
+            rin.pack_start(ehdr, False, False, 0)
+
+            self.lbl_vqe_e = Gtk.Label()
+            self.lbl_vqe_e.get_style_context().add_class("metric-val")
+            self.lbl_vqe_e.set_xalign(0.0)
+            rin.pack_start(self.lbl_vqe_e, False, False, 0)
+
+            self.lbl_fci_e = Gtk.Label()
+            self.lbl_fci_e.get_style_context().add_class("metric-val")
+            self.lbl_fci_e.set_xalign(0.0)
+            rin.pack_start(self.lbl_fci_e, False, False, 0)
+
+            self.lbl_acc = Gtk.Label()
+            self.lbl_acc.get_style_context().add_class("metric-val")
+            self.lbl_acc.set_xalign(0.0)
+            rin.pack_start(self.lbl_acc, False, False, 0)
+
+            self.lbl_qaoa = Gtk.Label()
+            self.lbl_qaoa.get_style_context().add_class("metric-val")
+            self.lbl_qaoa.set_xalign(0.0)
+            rin.pack_start(self.lbl_qaoa, False, False, 0)
+
+            hhdr = Gtk.Label(label="JORDAN-WIGNER HAMILTONIAN & ANSATZ")
+            hhdr.get_style_context().add_class("title-lbl")
+            hhdr.set_xalign(0.0)
+            rin.pack_start(hhdr, False, False, 2)
+
+            sw = Gtk.ScrolledWindow()
+            sw.set_vexpand(True)
+            self.ham_view = Gtk.TextView()
+            self.ham_view.set_editable(False)
+            self.ham_view.set_monospace(True)
+            self.ham_view.get_style_context().add_class("ham-view")
+            sw.add(self.ham_view)
+            rin.pack_start(sw, True, True, 0)
+
+            body.pack_start(right, False, False, 0)
+
+            self._ensure_pes(self.molecule)
+            self._recompute_qaoa()
+            self._recompute_vqe()
+
+        def _ensure_pes(self, mol: str) -> Dict[str, List[float]]:
+            if mol not in self.pes_cache:
+                pts = 14 if mol.upper() == "H2" else 9
+                self.pes_cache[mol] = compute_dissociation_curve(mol, r_min=0.4, r_max=2.6, points=pts)
+            return self.pes_cache[mol]
+
+        def _on_molecule_changed(self, combo) -> None:
+            m = combo.get_active_id() or "H2"
+            self.molecule = m
+            eq_map = {"H2": 0.735, "LiH": 1.595, "BeH2": 1.326}
+            self.bond_scale.set_value(eq_map.get(m, 0.735))
+            self._ensure_pes(m)
+            self._recompute_vqe()
+
+        def _on_bond_changed(self, scale) -> None:
+            self.bond_length = float(scale.get_value())
+            self._recompute_vqe()
+
+        def _on_qaoa_changed(self, combo) -> None:
+            self.qaoa_graph_id = combo.get_active_id() or "ring4"
+            self._recompute_qaoa()
+            self.canvas.queue_draw()
+
+        def _recompute_qaoa(self) -> None:
+            nq, edges = QAOA_GRAPHS[self.qaoa_graph_id]
+            qaoa = QAOA(nq, edges, p=1)
+            self.qaoa_result = qaoa.optimize(grid_steps=7)
+            gb = self.qaoa_result["optimal_gamma_beta"]
+            self.lbl_qaoa.set_text(
+                f"QAOA E[Cut]={self.qaoa_result['expected_cut']:.2f} (gamma={gb[0]:.2f}, beta={gb[1]:.2f})"
+            )
+
+        def _recompute_vqe(self) -> None:
+            ham = build_molecule(self.molecule, self.bond_length)
+            steps = 28 if ham.num_qubits == 2 else 16
+            lr = 0.55 if ham.num_qubits == 2 else 0.30
+            self.vqe_result = VQESolver(ham, layers=1).solve(steps=steps, lr=lr)
+
+            ev = float(self.vqe_result["vqe_energy_hartree"])
+            ef = float(self.vqe_result["exact_fci_hartree"])
+            de = float(self.vqe_result["chemical_accuracy_mHa"])
+            self.lbl_vqe_e.set_text(f"VQE Energy   : {ev:+.6f} Ha")
+            self.lbl_fci_e.set_text(f"Exact FCI    : {ef:+.6f} Ha")
+            status = "CHEM ACCURACY" if de <= 1.6 else "VARIATIONAL"
+            self.lbl_acc.set_text(f"Error |dE|   : {de:.3f} mHa [{status}]")
+
+            lines = [f"# {ham.molecule} @ R = {ham.bond_length_angstrom:.3f} A ({ham.num_qubits} Qubits)"]
+            for coeff, pstr in ham.terms:
+                lines.append(f"  {coeff:+.5f} * {pstr}")
+            lines.append("\n# Converged UCCSD / Hardware-Efficient Ansatz:")
+            lines.append(str(self.vqe_result["ansatz_qasm"]))
+            self.ham_view.get_buffer().set_text("\n".join(lines))
+            self.canvas.queue_draw()
+
+        def _on_draw(self, widget, cr) -> bool:
+            alloc = widget.get_allocation()
+            nq, edges = QAOA_GRAPHS[self.qaoa_graph_id]
+            draw_pes_and_convergence(
+                cr,
+                float(alloc.width),
+                float(alloc.height),
+                self.molecule,
+                self.bond_length,
+                self._ensure_pes(self.molecule),
+                self.vqe_result,
+                self.qaoa_result,
+                edges,
+                nq,
+            )
+            return False
+
+        def _on_export_ansatz(self, _btn) -> None:
+            qasm_s = str(self.vqe_result.get("ansatz_qasm", ""))
+            try:
+                with open(IPC_HILBERT_PATH, "w", encoding="utf-8") as f:
+                    json.dump({"source": f"VQE-{self.molecule}", "qasm": qasm_s}, f)
+            except Exception:
+                pass
+            hs = resolve_sibling_bin("omniq-hilbert-space")
+            cmd = [sys.executable, hs, IPC_HILBERT_PATH] if os.path.isfile(hs) else [hs, IPC_HILBERT_PATH]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    win = OmniQVQEWindow()
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+def run_self_test() -> int:
+    import cairo
+
+    for mol, r_eq in [("H2", 0.735), ("LiH", 1.595), ("BeH2", 1.326)]:
+        ham = build_molecule(mol, r_eq)
+        e_fci, _ = ham.exact_ground_energy()
+        assert e_fci < -0.5
+
+    h2_ham = MolecularHamiltonian.h2(0.735)
+    vqe_res = VQESolver(h2_ham, layers=1).solve(steps=30, lr=0.55)
+    assert float(vqe_res["chemical_accuracy_mHa"]) < 5.0
+    pes = compute_dissociation_curve("H2", r_min=0.4, r_max=2.6, points=6)
+    assert len(pes["radii_angstrom"]) == 6
+
+    nq, edges = QAOA_GRAPHS["ring4"]
+    qaoa_res = QAOA(nq, edges, p=1).optimize(grid_steps=7)
+    assert int(qaoa_res["best_cut_value"]) == 4
+
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 840, 560)
+    cr = cairo.Context(surf)
+    draw_pes_and_convergence(cr, 840.0, 560.0, "H2", 0.735, pes, vqe_res, qaoa_res, edges, nq)
+
+    print("[PASS] omniq-vqe-chem PES dissociation, parameter-shift VQE, and QAOA MaxCut verified.")
+    return 0
+
+def main() -> None:
+    if "--test" in sys.argv:
+        sys.exit(run_self_test())
+    launch_gui()
+
+if __name__ == "__main__":
+    main()

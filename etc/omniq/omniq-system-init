@@ -1,0 +1,288 @@
+#!/bin/sh
+
+if [ "${1:-}" = "--test" ]; then
+    sh -n "$0" && echo "[+] omniq-system-init syntax OK"
+    exit 0
+fi
+
+export PATH=/usr/local/bin:/bin:/sbin:/usr/bin:/usr/sbin
+export LD_LIBRARY_PATH=/usr/local/lib:/opt/omniq/lib:/lib:/usr/lib:/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu
+export HOME=/root
+export DISPLAY=:0
+export XDG_RUNTIME_DIR=/tmp/runtime-root
+export QT_QPA_PLATFORM=xcb
+export QT_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/qt5/plugins
+export QT_X11_NO_MITSHM=1
+export TCL_LIBRARY=/usr/share/tcltk/tcl8.6
+export TK_LIBRARY=/usr/share/tcltk/tk8.6
+export PYTHONPATH=/usr/lib/python3.12:/usr/lib/python3/dist-packages:/usr/lib/python3.12/site-packages
+export GDK_BACKEND=x11
+export GDK_PIXBUF_MODULE_FILE=/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache
+export XDG_DATA_DIRS=/usr/share:/usr/local/share
+export NO_AT_BRIDGE=1
+
+mountpoint -q /proc || mount -t proc proc /proc 2>/dev/null || true
+mountpoint -q /sys || mount -t sysfs sysfs /sys 2>/dev/null || true
+mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+
+if [ -c /dev/console ]; then
+    exec 0</dev/console 1>/dev/console 2>/dev/console 2>/dev/null || true
+fi
+
+echo "================================================================="
+echo "   OmniQ-OS (Real-Time Quantum Linux) - PID 1 System Init"
+echo "   Kernel: Linux $(uname -r 2>/dev/null || echo '7.0.0-43-generic-omniq-preempt-rt')"
+echo "================================================================="
+
+mountpoint -q /run || mount -t tmpfs tmpfs /run -o mode=0755 2>/dev/null || true
+mkdir -p /dev/pts /dev/shm /dev/accel /run/udev /run/udev/data /run/lock /run/user /run/user/0 /tmp /var/log /var/log/omniq /var/run /tmp/runtime-root
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts -o gid=5,mode=620,ptmxmode=666 2>/dev/null || true
+mountpoint -q /dev/shm || mount -t tmpfs tmpfs /dev/shm -o size=2G,mode=1777 2>/dev/null || true
+[ -c /dev/ptmx ] || mknod -m 666 /dev/ptmx c 5 2 2>/dev/null || true
+chmod 666 /dev/ptmx 2>/dev/null || true
+chmod 1777 /tmp 2>/dev/null || true
+chmod 700 /tmp/runtime-root 2>/dev/null || true
+
+hostname omniq 2>/dev/null || true
+
+if [ -e /dev/rtc ] || [ -e /dev/rtc0 ]; then
+    hwclock -u -s 2>/dev/null || hwclock -s 2>/dev/null || true
+fi
+
+mkdir -p /dev/accel
+if [ -f /opt/omniq/drivers/omniq_qpu.ko ]; then
+    insmod /opt/omniq/drivers/omniq_qpu.ko 2>/dev/null || true
+fi
+if [ ! -c /dev/accel/qpu0 ]; then
+    mknod -m 660 /dev/accel/qpu0 c 241 0 2>/dev/null || true
+fi
+
+trap 'echo "[*] Clean poweroff initiated..."; sync; busybox poweroff -f 2>/dev/null || poweroff -f' USR2 PWR
+trap 'echo "[*] Clean reboot initiated..."; sync; busybox reboot -f 2>/dev/null || reboot -f' USR1 INT TERM
+
+if [ -x /usr/lib/systemd/systemd-udevd ]; then
+    /usr/lib/systemd/systemd-udevd --daemon 2>/dev/null || true
+elif [ -x /lib/systemd/systemd-udevd ]; then
+    /lib/systemd/systemd-udevd --daemon 2>/dev/null || true
+fi
+
+for mod in vmwgfx fbdev bochs-drm virtio_gpu \
+           e1000 e1000e virtio_net 8250 8250_pci \
+           i915 amdgpu nouveau drm_kms_helper \
+           snd-hda-intel snd-sof-pci snd-usb-audio \
+           iwlwifi mac80211 cfg80211 \
+           btusb bluetooth bnep rfcomm \
+           usbcore xhci-pci ehci-pci ohci-pci uas usb-storage \
+           ftdi_sio cdc_acm cp210x ch341 \
+           usbhid hid-generic hidraw psmouse mousedev evdev joydev uinput i8042 atkbd serio serio_raw \
+           battery ac thermal processor; do
+    modprobe "$mod" 2>/dev/null || true
+done
+
+sleep 1
+
+for udev_bin in /bin/udevadm /usr/bin/udevadm /sbin/udevadm; do
+    if [ -x "$udev_bin" ]; then
+        "$udev_bin" trigger --action=add 2>/dev/null || true
+        "$udev_bin" settle --timeout=5 2>/dev/null || true
+        "$udev_bin" trigger --subsystem-match=input --action=add 2>/dev/null || true
+        break
+    fi
+done
+
+ip link set lo up 2>/dev/null || true
+for iface in $(ls /sys/class/net 2>/dev/null); do
+    if [ "$iface" != "lo" ]; then
+        ip link set "$iface" up 2>/dev/null || true
+        udhcpc -i "$iface" -b -q 2>/dev/null || dhclient "$iface" 2>/dev/null &
+        if ! ip addr show "$iface" 2>/dev/null | grep -q "inet "; then
+            ip addr add 10.0.2.15/24 dev "$iface" 2>/dev/null || true
+            ip route add default via 10.0.2.2 2>/dev/null || true
+        fi
+    fi
+done
+
+if [ -x /usr/lib/systemd/systemd-timesyncd ]; then
+    /usr/lib/systemd/systemd-timesyncd 2>/dev/null &
+elif command -v ntpd >/dev/null 2>&1; then
+    ntpd -q -p pool.ntp.org 2>/dev/null &
+fi
+
+mkdir -p /var/run/dbus /run/dbus /var/lib/dbus
+if [ -x /usr/bin/dbus-uuidgen ]; then
+    /usr/bin/dbus-uuidgen --ensure 2>/dev/null || true
+fi
+if [ -x /usr/bin/dbus-daemon ]; then
+    echo "[*] Launching D-Bus System Bus Daemon..."
+    /usr/bin/dbus-daemon --system --fork 2>/dev/null || true
+fi
+
+mkdir -p /var/lib/NetworkManager /var/run/NetworkManager /etc/NetworkManager/system-connections
+if [ -x /usr/sbin/NetworkManager ]; then
+    echo "[*] Launching NetworkManager service..."
+    /usr/sbin/NetworkManager 2>/dev/null &
+elif [ -x /usr/sbin/wpa_supplicant ]; then
+    /usr/sbin/wpa_supplicant -u -s -B 2>/dev/null || true
+fi
+
+mkdir -p /var/lib/bluetooth
+if [ -x /usr/libexec/bluetooth/bluetoothd ]; then
+    /usr/libexec/bluetooth/bluetoothd 2>/dev/null &
+elif [ -x /usr/sbin/bluetoothd ]; then
+    /usr/sbin/bluetoothd 2>/dev/null &
+fi
+
+if command -v amixer >/dev/null 2>&1; then
+    amixer sset Master 80% unmute 2>/dev/null || true
+    amixer sset Speaker 80% unmute 2>/dev/null || true
+    amixer sset Headphone 80% unmute 2>/dev/null || true
+fi
+
+mkdir -p /var/log/omniq /var/lib/omniq/soc2 /root/circuits
+chmod 700 /var/log/omniq /var/lib/omniq/soc2 2>/dev/null || true
+if [ -f /etc/sysctl.d/99-omniq-soc2.conf ]; then
+    sysctl -p /etc/sysctl.d/99-omniq-soc2.conf >/dev/null 2>&1 || true
+fi
+if command -v nft >/dev/null 2>&1 && [ -f /etc/nftables.soc2.conf ]; then
+    nft -f /etc/nftables.soc2.conf >/dev/null 2>&1 || true
+fi
+
+if [ -d /opt/omniq/circuits ]; then
+    cp -rn /opt/omniq/circuits/* /root/circuits/ 2>/dev/null || true
+fi
+if [ ! -f /root/circuits/bell_pair.qasm ]; then
+    cat > /root/circuits/bell_pair.qasm << 'QASMEOF'
+OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[2];
+creg c[2];
+h q[0];
+cx q[0], q[1];
+measure q -> c;
+QASMEOF
+fi
+if [ ! -f /root/circuits/ghz_8q.qasm ]; then
+    cat > /root/circuits/ghz_8q.qasm << 'QASMEOF'
+OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[8];
+creg c[8];
+h q[0];
+cx q[0], q[1];
+cx q[1], q[2];
+cx q[2], q[3];
+cx q[3], q[4];
+cx q[4], q[5];
+cx q[5], q[6];
+cx q[6], q[7];
+measure q -> c;
+QASMEOF
+fi
+
+if ! grep -q "mode *= *physical_lab" /etc/omniq/lab_rack.conf 2>/dev/null; then
+    for t_bin in /usr/local/bin/omniq-lab-twin /usr/bin/omniq-lab-twin /bin/omniq-lab-twin; do
+        if [ -x "$t_bin" ]; then
+            echo "[*] Launching OmniQ Cryo-Lab Hardware-in-the-Loop Rack Twin (SCPI :17777/:15025, Bluefors :19098, Modbus :15020, QICK :18888)..."
+            "$t_bin" --daemon >/var/log/omniq/lab_twin.log 2>&1 &
+            break
+        fi
+    done
+fi
+
+for d_bin in /usr/local/bin/omniqd /usr/bin/omniqd /bin/omniqd; do
+    if [ -x "$d_bin" ]; then
+        echo "[*] Launching OmniQ Quantum Daemon (SCHED_FIFO 95, port 9090)..."
+        "$d_bin" 9090 >/var/log/omniq/omniqd.log 2>&1 &
+        break
+    fi
+done
+
+for s_bin in /usr/local/bin/omniq-secret-api /usr/bin/omniq-secret-api /bin/omniq-secret-api; do
+    if [ -x "$s_bin" ]; then
+        echo "[*] Launching OmniQ PQC Secret API (ML-KEM-1024, port 9443)..."
+        "$s_bin" --daemon --port 9443 >/var/log/omniq/secret_api.log 2>&1 &
+        break
+    fi
+done
+
+for p_bin in /usr/local/bin/omniq-pqc-audit /usr/bin/omniq-pqc-audit /bin/omniq-pqc-audit; do
+    if [ -x "$p_bin" ]; then
+        echo "[*] Executing OmniQ Post-Quantum Cryptographic Hardening..."
+        "$p_bin" --harden >/var/log/omniq/pqc_boot.log 2>&1 &
+        break
+    fi
+done
+
+( while true; do /bin/bash </dev/ttyS0 >/dev/ttyS0 2>/dev/ttyS0 || /bin/sh </dev/ttyS0 >/dev/ttyS0 2>/dev/ttyS0 || sleep 1; done ) &
+( while true; do /bin/bash </dev/tty2 >/dev/tty2 2>/dev/tty2 || /bin/sh </dev/tty2 >/dev/tty2 2>/dev/tty2 || sleep 1; done ) &
+
+CMDLINE=$(cat /proc/cmdline 2>/dev/null || echo "")
+case "$CMDLINE" in
+    *omniq_mode=install*)
+        echo "================================================================="
+        echo "   OmniQ-OS - Guided Permanent NVMe/SATA Disk Installer Mode"
+        echo "================================================================="
+        for inst in /usr/local/bin/omniq-installer /usr/bin/omniq-installer /bin/omniq-installer; do
+            if [ -x "$inst" ]; then
+                "$inst" || true
+                break
+            fi
+        done
+        echo "[*] Installer finished. Type 'reboot', 'poweroff', 'desktop', or 'shell':"
+        while true; do
+            printf "omniq-installer> "
+            read -r CMD || sleep 1
+            case "$CMD" in
+                reboot|restart) sync; busybox reboot -f 2>/dev/null || reboot -f ;;
+                poweroff|shutdown) sync; busybox poweroff -f 2>/dev/null || poweroff -f ;;
+                desktop|gui) /usr/local/bin/omniq-desktop-start || true ;;
+                shell|sh|bash) /bin/bash || /bin/sh ;;
+            esac
+        done
+        ;;
+    *omniq_mode=appliance*)
+        echo "[*] OmniQ-OS Cryogenic Rack Appliance Mode Active (qpu-smi --watch)..."
+        while true; do
+            for smi in /usr/local/bin/qpu-smi /usr/bin/qpu-smi /bin/qpu-smi; do
+                if [ -x "$smi" ]; then
+                    cttyhack "$smi" --watch 2>/dev/null || "$smi" --watch || true
+                    break
+                fi
+            done
+            sleep 1
+        done
+        ;;
+    *omniq_mode=console*|*single*)
+        echo "[*] OmniQ-OS Diagnostic Headless Console Mode Active."
+        echo "Type 'omniq-desktop-start' for X11 desktop or 'qpu-smi --watch' for telemetry."
+        while true; do
+            cttyhack /bin/bash --login 2>/dev/null || /bin/bash --login || /bin/sh
+            sleep 1
+        done
+        ;;
+    *)
+        echo "[*] Autostarting OmniQ-OS Glassmorphic Quantum Desktop (X11 Session)..."
+        while true; do
+            if [ -x /usr/local/bin/omniq-desktop-start ]; then
+                /usr/local/bin/omniq-desktop-start || true
+            elif [ -x /bin/omniq-desktop-start ]; then
+                /bin/omniq-desktop-start || true
+            fi
+            if [ -f /tmp/.omniq_shutdown ]; then
+                echo "[*] Clean poweroff requested. Powering off OmniQ-OS..."
+                sync
+                busybox poweroff -f 2>/dev/null || poweroff -f
+                break
+            fi
+            if [ -f /tmp/.omniq_reboot ]; then
+                echo "[*] Clean reboot requested. Restarting OmniQ-OS..."
+                sync
+                busybox reboot -f 2>/dev/null || reboot -f
+                break
+            fi
+            echo "[!] Graphical session ended. Spawning diagnostic shell (Ctrl+D to restart desktop)..."
+            cttyhack /bin/bash 2>/dev/null || /bin/bash || /bin/sh
+            sleep 1
+        done
+        ;;
+esac

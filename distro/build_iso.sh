@@ -1,10 +1,4 @@
 #!/bin/bash
-# SPDX-License-Identifier: Apache-2.0
-#
-# OmniQ-OS Debian Real-Time Quantum Linux (XFCE Edition) ISO Generator
-# Assembles bootable live ISO image with PREEMPT_RT kernel, XFCE desktop, and QPU drivers.
-#
-# Copyright (C) 2026 OmniQ Project.
 
 set -euo pipefail
 
@@ -19,7 +13,6 @@ echo " Desktop Environment: XFCE 4 (Kali-Style Obsidian/Cyan Theme)   "
 echo " Kernel Configuration: PREEMPT_RT Quantum Drivers                "
 echo "================================================================="
 
-# Check for live-build tools
 if ! command -v lb >/dev/null 2>&1; then
     echo "Notice: 'lb' (live-build) is not installed on this host."
     echo "To produce physical ISO images on a Debian build server:"
@@ -41,7 +34,6 @@ mkdir -p "${BUILD_DIR}/config/includes.chroot/usr/bin"
 mkdir -p "${BUILD_DIR}/config/includes.chroot/usr/src/omniq-qpu-0.1.0-rt"
 mkdir -p "${BUILD_DIR}/config/includes.chroot/opt/omniqos"
 
-# Copy live-build scripts
 cp "${SCRIPT_DIR}/live-build/auto/config" "${BUILD_DIR}/auto/config"
 chmod +x "${BUILD_DIR}/auto/config"
 
@@ -52,13 +44,11 @@ cp "${SCRIPT_DIR}/live-build/config/hooks/live/01-quantum-rt-tuning.hook.chroot"
    "${BUILD_DIR}/config/hooks/live/01-quantum-rt-tuning.hook.chroot"
 chmod +x "${BUILD_DIR}/config/hooks/live/01-quantum-rt-tuning.hook.chroot"
 
-# Copy systemd units
 cp "${SCRIPT_DIR}/systemd/omniqd.service" \
    "${BUILD_DIR}/config/includes.chroot/etc/systemd/system/omniqd.service"
 cp "${SCRIPT_DIR}/systemd/qpu-realtime-tuning.service" \
    "${BUILD_DIR}/config/includes.chroot/etc/systemd/system/qpu-realtime-tuning.service"
 
-# Copy kernel sysctl and limits
 cp "${SCRIPT_DIR}/config/etc/sysctl.d/99-quantum-rt.conf" \
    "${BUILD_DIR}/config/includes.chroot/etc/sysctl.d/99-quantum-rt.conf"
 cp "${SCRIPT_DIR}/config/etc/security/limits.d/99-quantum-rt.conf" \
@@ -66,7 +56,6 @@ cp "${SCRIPT_DIR}/config/etc/security/limits.d/99-quantum-rt.conf" \
 cp "${SCRIPT_DIR}/config/etc/modules-load.d/omniq_qpu.conf" \
    "${BUILD_DIR}/config/includes.chroot/etc/modules-load.d/omniq_qpu.conf"
 
-# Copy branding assets
 cp "${SCRIPT_DIR}/branding/grub/theme.txt" \
    "${BUILD_DIR}/config/includes.chroot/boot/grub/themes/omniq/theme.txt"
 cp "${SCRIPT_DIR}/branding/plymouth/omniq.plymouth" \
@@ -74,13 +63,10 @@ cp "${SCRIPT_DIR}/branding/plymouth/omniq.plymouth" \
 cp "${SCRIPT_DIR}/branding/plymouth/omniq.script" \
    "${BUILD_DIR}/config/includes.chroot/usr/share/plymouth/themes/omniq/omniq.script"
 
-# Copy DKMS kernel module source
 cp -r "${REPO_ROOT}/kernel/"* "${BUILD_DIR}/config/includes.chroot/usr/src/omniq-qpu-0.1.0-rt/"
 
-# Copy Python SDK
 cp -r "${REPO_ROOT}/runtime/python/"* "${BUILD_DIR}/config/includes.chroot/opt/omniqos/"
 
-# Copy compiled qpu-smi tool if built
 if [ -f "${REPO_ROOT}/tools/qpu-smi/qpu-smi" ]; then
     cp "${REPO_ROOT}/tools/qpu-smi/qpu-smi" "${BUILD_DIR}/config/includes.chroot/usr/bin/qpu-smi"
     chmod +x "${BUILD_DIR}/config/includes.chroot/usr/bin/qpu-smi"

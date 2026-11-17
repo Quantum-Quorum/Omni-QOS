@@ -1,7 +1,6 @@
 #!/bin/sh
 set -e
 
-# Kali-Style Debian Live-Build Configuration
 lb config noauto \
     --mode debian \
     --distribution bookworm \

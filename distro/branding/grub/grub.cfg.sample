@@ -1,9 +1,6 @@
-# OmniQ-OS GRUB Bootloader Configuration Template
-
 set timeout=5
 set default="0"
 
-# Load OmniQ-OS Theme
 insmod gfxterm
 insmod png
 set theme=/boot/grub/themes/omniq/theme.txt
