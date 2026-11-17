@@ -1,6 +1,17 @@
+# Kali-Style XFCE Desktop Environment
+task-xfce-desktop
+xfce4
+xfce4-terminal
+xfce4-whiskermenu-plugin
+xfce4-goodies
+lightdm
+lightdm-gtk-greeter
+xorg
+mesa-utils
+
 # OmniQ-OS Real-Time Kernel & Hardware Subsystems
-linux-image-rt-amd64
-linux-headers-rt-amd64
+linux-image-rt-arm64
+linux-headers-rt-arm64
 dkms
 build-essential
 pciutils
@@ -36,3 +47,4 @@ plymouth
 plymouth-themes
 grub-efi-amd64-bin
 grub-pc-bin
+

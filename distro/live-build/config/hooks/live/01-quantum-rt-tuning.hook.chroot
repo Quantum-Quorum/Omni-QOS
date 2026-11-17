@@ -5,7 +5,8 @@ echo "[OmniQ-OS] Executing Quantum Real-Time Chroot Customization Hook..."
 
 # 1. Create quantum hardware access group
 groupadd -f quantum
-usermod -aG quantum ubuntu || true
+useradd -m -s /bin/bash -g quantum quantum 2>/dev/null || true
+usermod -aG quantum user 2>/dev/null || true
 
 # 2. Configure Udev rules for /dev/accel/qpu*
 cat << 'EOF' > /etc/udev/rules.d/99-omniq-qpu.rules
@@ -30,3 +31,4 @@ if [ -d /usr/share/plymouth/themes/omniq ]; then
 fi
 
 echo "[OmniQ-OS] Quantum Real-Time Configuration Completed."
+

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OmniQ 3D Debugger
+Comment=Interactive 3D Bloch Sphere & Entanglement Quantum Debugger
+Exec=gnome-terminal --title="OmniQ Debugger" -- /bin/bash -c "python3 -m omniqos.studio --mode asm -d; exec bash"
+Icon=/usr/share/icons/omniq-logo.png
+Categories=Development;Education;Quantum;
+Terminal=false
+StartupNotify=true

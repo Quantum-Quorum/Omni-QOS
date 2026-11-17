@@ -27,3 +27,4 @@ menuentry "OmniQ-OS 24.04 LTS (Cryogenic Hardware Diagnostics & Calibration)" {
     linux /boot/vmlinuz-6.8.0-rt root=UUID=${ROOT_UUID} ro single omniq_diag=1
     initrd /boot/initrd.img-6.8.0-rt
 }
+

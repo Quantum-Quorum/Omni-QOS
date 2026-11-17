@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=QPU System Management
+Comment=Live Cryogenic & Quantum Hardware Telemetry Dashboard
+Exec=gnome-terminal --title="QPU-SMI System Dashboard" -- /bin/bash -c "qpu-smi -l 1; exec bash"
+Icon=/usr/share/icons/omniq-logo.png
+Categories=System;Monitor;Quantum;
+Terminal=false
+StartupNotify=true

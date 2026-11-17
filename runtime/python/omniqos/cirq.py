@@ -47,3 +47,4 @@ class OmniQCirqResult:
 
     def histogram(self, key: str = "m") -> dict:
         return self.counts
+

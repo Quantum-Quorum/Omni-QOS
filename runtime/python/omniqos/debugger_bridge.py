@@ -53,3 +53,4 @@ class OmniQDebuggerBridge:
             print(f"[OmniQ Debugger Bridge] omniq-debugger native binary not yet built. Session file ready at: {temp_path}")
             print(f"[OmniQ Debugger Bridge] You can open it via: omniq-debugger {temp_path}")
             return False
+

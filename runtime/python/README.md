@@ -14,3 +14,4 @@ Python SDK, framework adapters, and interactive quantum assembly studio for **Om
   * Raw pulse schedule inspector
   * Live histogram visualizer
   * One-click bridge to the OmniQ 3D GUI Debugger
+
