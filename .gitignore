@@ -1,4 +1,19 @@
-# Object files and kernel build artifacts
+# Build outputs, VM disks, and distribution ISO images
+*.iso
+*.iso.sha256
+*.vdi
+build/
+**/build/
+*.tar.gz
+*.tar.gz.sha256
+.venv/
+*.bak
+
+# Fetched third-party binaries (regenerate with scripts/vendor_picom.sh)
+vendor/
+lib/libxdo.so*
+
+# C/C++ & Kernel compilation artifacts
 *.o
 *.ko
 *.mod
@@ -7,29 +22,27 @@
 *.order
 *.symvers
 *.cmd
+.*cmd
 .tmp_versions/
 modules.order
 Module.symvers
-
-# Build output
-build/
-bin/
 *.a
 *.so
+*.so.*
 *.dylib
 
-# Editor and OS
+# Python bytecode and caches
+bin/__pycache__/
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor, AI agent configs, and OS files
+.agents/
+.agent/
+.gemini/
 .DS_Store
 *.swp
 *~
 .vscode/
 .idea/
-__pycache__/
-*.pyc
-*.pyo
-
-
-# ISO images and checksums
-*.iso
-*.iso.sha256
-

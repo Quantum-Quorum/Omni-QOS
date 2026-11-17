@@ -1,0 +1,12 @@
+Defaults	env_reset
+Defaults	mail_badpass
+Defaults	secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# User privilege specification
+root	ALL=(ALL:ALL) ALL
+
+# Members of the sudo group may gain root privileges with authentication
+%sudo	ALL=(ALL:ALL) ALL
+%wheel	ALL=(ALL:ALL) ALL
+omniq	ALL=(ALL:ALL) ALL
+quantum	ALL=(ALL:ALL) ALL

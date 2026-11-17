@@ -1,0 +1,76 @@
+#!/bin/sh
+# ==============================================================================
+# OmniQ-OS: Real-Time Quantum Linux
+# Kernel & Distribution Identity Utility: bin/uname
+# Returns 7.0.0-43-generic-omniq-preempt-rt for -r / -a
+# ==============================================================================
+
+if [ "${1:-}" = "--test" ]; then
+    sh -n "$0" && echo "[+] uname wrapper syntax OK"
+    exit 0
+fi
+
+REAL_UNAME=""
+if [ -x /bin/busybox ]; then
+    REAL_UNAME="/bin/busybox uname"
+elif [ -x /bin/uname ] && [ "/bin/uname" != "$0" ]; then
+    REAL_UNAME="/bin/uname"
+elif [ -x /usr/bin/uname ] && [ "/usr/bin/uname" != "$0" ]; then
+    REAL_UNAME="/usr/bin/uname"
+fi
+
+SYSNAME="Linux"
+NODENAME="$(hostname 2>/dev/null || echo 'omniq')"
+if [ -z "$NODENAME" ] || [ "$NODENAME" = "(none)" ]; then
+    NODENAME="omniq"
+fi
+RELEASE="7.0.0-43-generic-omniq-preempt-rt"
+VERSION="#1 SMP PREEMPT_RT $(date +'%a %b %d %T %Z %Y')"
+MACHINE="x86_64"
+OS="OmniQ-OS/Linux"
+
+if [ $# -eq 0 ]; then
+    echo "$SYSNAME"
+    exit 0
+fi
+
+for arg in "$@"; do
+    if [ "$arg" = "-a" ] || [ "$arg" = "--all" ]; then
+        echo "$SYSNAME $NODENAME $RELEASE $VERSION $MACHINE $OS"
+        exit 0
+    fi
+done
+
+OUTPUT=""
+for arg in "$@"; do
+    case "$arg" in
+        -s|--kernel-name)
+            OUTPUT="${OUTPUT:+$OUTPUT }$SYSNAME"
+            ;;
+        -n|--nodename)
+            OUTPUT="${OUTPUT:+$OUTPUT }$NODENAME"
+            ;;
+        -r|--kernel-release)
+            OUTPUT="${OUTPUT:+$OUTPUT }$RELEASE"
+            ;;
+        -v|--kernel-version)
+            OUTPUT="${OUTPUT:+$OUTPUT }$VERSION"
+            ;;
+        -m|--machine|-p|--processor|-i|--hardware-platform)
+            OUTPUT="${OUTPUT:+$OUTPUT }$MACHINE"
+            ;;
+        -o|--operating-system)
+            OUTPUT="${OUTPUT:+$OUTPUT }$OS"
+            ;;
+        *)
+            if [ -n "$REAL_UNAME" ]; then
+                exec $REAL_UNAME "$@"
+            else
+                echo "$SYSNAME"
+                exit 0
+            fi
+            ;;
+    esac
+done
+
+echo "$OUTPUT"

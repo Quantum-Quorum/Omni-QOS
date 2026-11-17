@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ========================================================================= -->
+<!-- OmniQ-OS: Real-Time Quantum Linux - Openbox Window Manager Configuration  -->
+<!-- ========================================================================= -->
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <theme>
+    <name>Onyx</name>
+    <titleLayout>NLIMC</titleLayout>
+    <keepBorder>no</keepBorder>
+    <animateIconify>no</animateIconify>
+  </theme>
+
+  <applications>
+    <application type="desktop">
+      <decor>no</decor>
+      <position force="yes">
+        <x>0</x>
+        <y>0</y>
+      </position>
+      <fullscreen>yes</fullscreen>
+      <maximized>yes</maximized>
+      <layer>below</layer>
+      <skip_taskbar>yes</skip_taskbar>
+      <skip_pager>yes</skip_pager>
+    </application>
+
+    <application class="OmniqDesktop">
+      <decor>no</decor>
+      <position force="yes">
+        <x>0</x>
+        <y>0</y>
+      </position>
+      <layer>below</layer>
+      <skip_taskbar>yes</skip_taskbar>
+      <skip_pager>yes</skip_pager>
+    </application>
+
+    <application class="Omniq-control-panel">
+      <decor>no</decor>
+      <layer>top</layer>
+      <skip_taskbar>yes</skip_taskbar>
+    </application>
+
+    <application class="Omniq-spotlight">
+      <decor>no</decor>
+      <layer>top</layer>
+      <skip_taskbar>yes</skip_taskbar>
+    </application>
+
+    <application class="Omniq-app-launcher">
+      <decor>no</decor>
+      <layer>top</layer>
+      <skip_taskbar>yes</skip_taskbar>
+    </application>
+  </applications>
+
+  <keyboard>
+    <chainQuitKey>C-g</chainQuitKey>
+    <keybind key="A-space">
+      <action name="Execute"><command>omniq-spotlight</command></action>
+    </keybind>
+    <keybind key="F1">
+      <action name="Execute"><command>omniq-app-launcher</command></action>
+    </keybind>
+    <keybind key="F2">
+      <action name="Execute"><command>omniq-terminal</command></action>
+    </keybind>
+    <keybind key="F8">
+      <action name="Execute"><command>omniq-control-panel</command></action>
+    </keybind>
+    <keybind key="C-A-t">
+      <action name="Execute"><command>omniq-terminal</command></action>
+    </keybind>
+    <keybind key="C-A-h">
+      <action name="Execute"><command>omniq-hilbert-space</command></action>
+    </keybind>
+    <keybind key="C-A-m">
+      <action name="Execute"><command>omniq-circuit-maker</command></action>
+    </keybind>
+    <keybind key="C-A-c">
+      <action name="Execute"><command>omniq-gui</command></action>
+    </keybind>
+  </keyboard>
+</openbox_config>

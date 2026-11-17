@@ -33,6 +33,8 @@ def _find_and_load_lib():
         os.path.join(base_dir, "libomniq_qpu.dylib"),
         os.path.join(base_dir, "libomniq_qpu.so"),
         # Installed system paths
+        os.path.join(base_dir, "..", "..", "..", "lib", "libomniq_qpu.so"),
+        "/opt/omniq/lib/libomniq_qpu.so",
         "/usr/local/lib/libomniq_qpu.dylib",
         "/usr/local/lib/libomniq_qpu.so",
         "/usr/lib/libomniq_qpu.so",
@@ -146,6 +148,16 @@ class _QResultsRead(Structure):
         ("execution_time_ns", c_uint64),
     ]
 
+class _QInterlockState(Structure):
+    _fields_ = [
+        ("tripped", c_uint32),
+        ("rf_dac_clamped", c_uint32),
+        ("temp_mxc_mK", c_uint32),
+        ("threshold_mK", c_uint32),
+        ("trip_count", c_uint64),
+        ("reason", c_char * 64),
+    ]
+
 # Setup C Function Signatures if Library is present
 if _LIB:
     _LIB.qpu_open.restype = c_void_p
@@ -174,6 +186,16 @@ if _LIB:
 
     _LIB.qpu_reset_qubit.restype = c_int32
     _LIB.qpu_reset_qubit.argtypes = [c_void_p, c_uint16]
+
+    if hasattr(_LIB, "qpu_trip_interlock"):
+        _LIB.qpu_trip_interlock.restype = c_int32
+        _LIB.qpu_trip_interlock.argtypes = [c_void_p, ctypes.c_char_p, POINTER(_QInterlockState)]
+        _LIB.qpu_reset_interlock.restype = c_int32
+        _LIB.qpu_reset_interlock.argtypes = [c_void_p, POINTER(_QInterlockState)]
+        _LIB.qpu_set_cryo_temp.restype = c_int32
+        _LIB.qpu_set_cryo_temp.argtypes = [c_void_p, c_uint32, POINTER(_QInterlockState)]
+        _LIB.qpu_get_interlock.restype = c_int32
+        _LIB.qpu_get_interlock.argtypes = [c_void_p, POINTER(_QInterlockState)]
 
 @dataclass
 class QPUTopology:
@@ -272,8 +294,8 @@ class QPU:
             return QPUTopology(
                 driver_version="1.2.0-rt",
                 device_name="OmniQ Transmon 127-Qubit Cryogenic Array",
-                operating_state=QPUOperatingState.ONLINE_HARDWARE,
-                technology=QPUTechnology.SUPERCONDUCTING,
+                operating_state=QPUOperatingState.SIMULATOR,
+                technology=QPUTechnology.SIMULATED,
                 total_qubits=127,
                 total_couplers=len(couplers),
                 mixing_chamber_temp_mK=14.250,
@@ -299,8 +321,8 @@ class QPU:
             total_qubits=top.total_qubits,
             total_couplers=top.total_couplers,
             mixing_chamber_temp_mK=top.cryo.temp_mxc_mK / 1000.0,
-            avg_t1_us=(top.global_avg_t1_ns / 1000.0) / 1000.0,
-            avg_t2_us=(top.global_avg_t2_ns / 1000.0) / 1000.0,
+            avg_t1_us=top.global_avg_t1_ns / 1000.0,
+            avg_t2_us=top.global_avg_t2_ns / 1000.0,
             couplers=couplers,
         )
 
@@ -493,4 +515,55 @@ class QPU:
         ret = _LIB.qpu_reset_qubit(self._ctx, qubit_id)
         if ret != 0:
             raise RuntimeError(f"Failed to reset qubit {qubit_id} (ret={ret})")
+
+    def get_interlock(self) -> Dict[str, object]:
+        if self._sim_mode or not hasattr(_LIB, "qpu_get_interlock"):
+            return {
+                "tripped": False,
+                "rf_dac_clamped": False,
+                "temp_mxc_mK": 14.250,
+                "threshold_mK": 50.000,
+                "trip_count": 0,
+                "reason": "NOMINAL (< 50.000 mK)",
+            }
+        st = _QInterlockState()
+        ret = _LIB.qpu_get_interlock(self._ctx, byref(st))
+        if ret != 0:
+            raise RuntimeError(f"Failed to query interlock (ret={ret})")
+        return {
+            "tripped": bool(st.tripped),
+            "rf_dac_clamped": bool(st.rf_dac_clamped),
+            "temp_mxc_mK": st.temp_mxc_mK / 1000.0,
+            "threshold_mK": st.threshold_mK / 1000.0,
+            "trip_count": int(st.trip_count),
+            "reason": st.reason.decode("utf-8", errors="ignore"),
+        }
+
+    def trip_interlock(self, reason: str = "MANUAL_EMERGENCY_RF_CLAMP") -> Dict[str, object]:
+        if self._sim_mode or not hasattr(_LIB, "qpu_trip_interlock"):
+            return {"tripped": True, "rf_dac_clamped": True, "reason": reason}
+        st = _QInterlockState()
+        ret = _LIB.qpu_trip_interlock(self._ctx, reason.encode("utf-8"), byref(st))
+        if ret != 0:
+            raise RuntimeError(f"Failed to trip interlock (ret={ret})")
+        return self.get_interlock()
+
+    def reset_interlock(self) -> Dict[str, object]:
+        if self._sim_mode or not hasattr(_LIB, "qpu_reset_interlock"):
+            return {"tripped": False, "rf_dac_clamped": False, "reason": "NOMINAL"}
+        st = _QInterlockState()
+        ret = _LIB.qpu_reset_interlock(self._ctx, byref(st))
+        if ret != 0:
+            raise RuntimeError(f"Cannot reset interlock while MXC >= 50.000 mK (ret={ret})")
+        return self.get_interlock()
+
+    def set_cryo_temp_mK(self, temp_mK: float) -> Dict[str, object]:
+        if self._sim_mode or not hasattr(_LIB, "qpu_set_cryo_temp"):
+            return {"tripped": temp_mK >= 50.0, "temp_mxc_mK": temp_mK}
+        st = _QInterlockState()
+        ret = _LIB.qpu_set_cryo_temp(self._ctx, int(round(temp_mK * 1000.0)), byref(st))
+        if ret != 0:
+            raise RuntimeError(f"Failed to set cryo temp (ret={ret})")
+        return self.get_interlock()
+
 

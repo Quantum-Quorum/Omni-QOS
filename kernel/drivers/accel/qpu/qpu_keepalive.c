@@ -23,6 +23,7 @@
 static int qpu_keepalive_worker(void *data)
 {
 	struct qpu_device *qdev = (struct qpu_device *)data;
+	(void)qdev;
 
 	pr_info("omniq_qpu: q-keepalived dynamic decoupling thread started\n");
 

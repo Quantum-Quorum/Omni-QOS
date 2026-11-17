@@ -15,5 +15,5 @@ omniq_qpu-y := \
 	qpu_keepalive.o \
 	qpu_fallback.o
 
-ccflags-y += -I$(src)/../../include/uapi
+ccflags-y += -I$(src)/../../../include/uapi
 

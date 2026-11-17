@@ -14,6 +14,8 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/uaccess.h>
+#define QPU_ALLOC(sz) kzalloc((sz), GFP_KERNEL)
+#define QPU_FREE(p)   kfree((p))
 #else
 #include <stdio.h>
 #include <string.h>
@@ -21,8 +23,8 @@
 #include <time.h>
 #define copy_to_user(to, from, n) (memcpy((to), (from), (n)), 0)
 #define copy_from_user(to, from, n) (memcpy((to), (from), (n)), 0)
-#define kmalloc(sz, flags) malloc(sz)
-#define kfree(p) free(p)
+#define QPU_ALLOC(sz) calloc(1, (sz))
+#define QPU_FREE(p)   free((p))
 #endif
 
 #include "qpu_internal.h"
@@ -34,19 +36,42 @@ int qpu_fallback_init(struct qpu_device *qdev)
 	qdev->technology = QPU_TECH_SIMULATED;
 	strncpy(qdev->device_name, "OmniQ-VirtQPU-CoProcessor-127", sizeof(qdev->device_name) - 1);
 
-	/* Set up nominal simulated cryo telemetry */
-	qdev->cryo.temp_50k_mK = 48500;       /* 48.5 K */
-	qdev->cryo.temp_4k_mK = 3850;         /* 3.85 K */
-	qdev->cryo.temp_still_mK = 820;       /* 820 mK */
-	qdev->cryo.temp_cold_plate_mK = 95;   /* 95 mK */
-	qdev->cryo.temp_mxc_mK = 14250;       /* 14.25 mK */
-	qdev->cryo.threshold_mK = 50000;      /* 50 mK threshold */
-	qdev->cryo.cryo_status_flags = 0;
+	/* Set up nominal simulated cryo telemetry (display scaled by /1000) */
+	qdev->cryo.temp_50k_mK = 48500;        /* 48.500 K */
+	qdev->cryo.temp_4k_mK = 3850;          /* 3.850 K */
+	qdev->cryo.temp_still_mK = 820000;     /* 820.000 mK */
+	qdev->cryo.temp_cold_plate_mK = 95000; /* 95.000 mK */
+	qdev->cryo.temp_mxc_mK = 14250;        /* 14.250 mK */
+	qdev->cryo.threshold_mK = 50000;       /* 50.000 mK threshold */
+	qdev->cryo.cryo_status_flags = QPU_CRYO_FLAG_NOMINAL;
+
+	qdev->interlock_tripped = false;
+	qdev->rf_dac_clamped = false;
+	qdev->interlock_trip_count = 0;
+	strncpy(qdev->interlock_reason, "NOMINAL (< 50.000 mK)", sizeof(qdev->interlock_reason) - 1);
 
 	/* Setup QMMU topology */
 	qpu_qmmu_init(qdev);
 
 	return 0;
+}
+
+void qpu_fallback_cleanup(struct qpu_device *qdev)
+{
+	struct qpu_job_entry *curr, *next;
+
+	if (!qdev)
+		return;
+
+	curr = qdev->job_history_head;
+	while (curr) {
+		next = curr->next;
+		if (curr->results_data)
+			QPU_FREE(curr->results_data);
+		QPU_FREE(curr);
+		curr = next;
+	}
+	qdev->job_history_head = NULL;
 }
 
 /* Pseudo-random helper for simulation */
@@ -73,6 +98,13 @@ int qpu_fallback_submit_job(struct qpu_device *qdev, struct qpu_job_submission *
 	if (!job || job->shots == 0)
 		return -22; /* -EINVAL */
 
+	/* Enforce Cryogenic Thermal Safety & RF Microwave Interlock */
+	if (qdev->interlock_tripped || qdev->rf_dac_clamped ||
+	    qdev->cryo.temp_mxc_mK >= qdev->cryo.threshold_mK) {
+		job->status = 0xDEAD;
+		return -13; /* -EACCES: RF pulse generation clamped to 0x00 */
+	}
+
 	/* Find partition to determine bitstring width */
 	for (i = 0; i < QPU_MAX_PARTITIONS; i++) {
 		if (qdev->partitions[i].active && qdev->partitions[i].partition_id == job->partition_id) {
@@ -82,7 +114,7 @@ int qpu_fallback_submit_job(struct qpu_device *qdev, struct qpu_job_submission *
 	}
 
 	shot_bytes = ((bit_width + 7) / 8);
-	buf = kmalloc(shot_bytes * job->shots, 0);
+	buf = QPU_ALLOC(shot_bytes * job->shots);
 	if (!buf)
 		return -12; /* -ENOMEM */
 
@@ -110,9 +142,9 @@ int qpu_fallback_submit_job(struct qpu_device *qdev, struct qpu_job_submission *
 	}
 
 	/* Allocate job entry */
-	entry = kmalloc(sizeof(*entry), 0);
+	entry = QPU_ALLOC(sizeof(*entry));
 	if (!entry) {
-		kfree(buf);
+		QPU_FREE(buf);
 		return -12;
 	}
 

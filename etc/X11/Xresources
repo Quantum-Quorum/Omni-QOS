@@ -1,0 +1,21 @@
+! ==============================================================================
+! OmniQ-OS: Real-Time Quantum Linux - X11 Core Visual Configuration
+! Subpixel Font Antialiasing, Hinting & Dark Fallback Palette
+! ==============================================================================
+
+Xft.antialias: 1
+Xft.hinting: 1
+Xft.hintstyle: hintslight
+Xft.rgba: rgb
+Xft.lcdfilter: lcddefault
+Xcursor.theme: DMZ-White
+Xcursor.size: 24
+
+*background: #0D0B18
+*foreground: #EDEAF5
+*highlightColor: #00E5FF
+*selectBackground: #8A4FFF
+*selectForeground: #FFFFFF
+*activeBackground: #1A1530
+*activeForeground: #FFFFFF
+*troughColor: #141126

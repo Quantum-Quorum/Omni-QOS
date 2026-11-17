@@ -33,6 +33,11 @@ qpu_ctx_t *qpu_open(const char *device_path);
 void qpu_close(qpu_ctx_t *ctx);
 
 /**
+ * Returns 1 if operating against userspace emulator fallback, 0 if kernel /dev/accel/qpu0.
+ */
+int qpu_is_emulated(qpu_ctx_t *ctx);
+
+/**
  * Query physical QPU topology, qubit counts, and cryogenic status.
  */
 int qpu_get_topology(qpu_ctx_t *ctx, struct qpu_topology_info *top);
@@ -71,6 +76,14 @@ int qpu_reset_qubit(qpu_ctx_t *ctx, uint16_t qubit_id);
  * Configure GPUDirect-QPU zero-copy DMA peer-to-peer BAR mapping.
  */
 int qpu_configure_gpudirect(qpu_ctx_t *ctx, int dma_buf_fd, uint64_t vram_pci_addr, uint64_t size_bytes, struct qpu_p2p_dma_desc *out_p2p);
+
+/**
+ * Cryogenic Thermal Safety & RF Microwave Interlock controls.
+ */
+int qpu_trip_interlock(qpu_ctx_t *ctx, const char *reason, struct qpu_interlock_state *out_state);
+int qpu_reset_interlock(qpu_ctx_t *ctx, struct qpu_interlock_state *out_state);
+int qpu_set_cryo_temp(qpu_ctx_t *ctx, uint32_t temp_mxc_uK, struct qpu_interlock_state *out_state);
+int qpu_get_interlock(qpu_ctx_t *ctx, struct qpu_interlock_state *out_state);
 
 #ifdef __cplusplus
 }

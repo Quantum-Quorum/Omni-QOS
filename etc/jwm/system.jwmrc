@@ -1,0 +1,387 @@
+<?xml version="1.0"?>
+<JWM>
+    <!-- ================================================================= -->
+    <!-- OmniQ-OS: Real-Time Quantum Linux - Glassmorphic Desktop Shell    -->
+    <!-- Palette: #0D0B18, #141126, #1A1530, #00E5FF, #8A4FFF, #00FF9D     -->
+    <!-- ================================================================= -->
+
+    <IconPath>/usr/share/omniq/icons</IconPath>
+    <IconPath>/etc/omniq/icons</IconPath>
+    <IconPath>/usr/share/omniq/icons/16x16</IconPath>
+    <IconPath>/etc/omniq/icons/16x16</IconPath>
+    <IconPath>/usr/share/pixmaps</IconPath>
+    <IconPath>/usr/share/icons</IconPath>
+
+    <!-- 26px Flush Top Mission Bar -->
+    <Tray x="0" y="0" height="26" autohide="off" insert="right" valign="top">
+        <TrayButton icon="omniq-logo.png" label=" OmniQ " popup="OmniQ Applications Overview [F1]">exec:/usr/local/bin/omniq-app-launcher</TrayButton>
+        <Spacer width="6"/>
+        <TrayButton icon="spotlight.png" label=" Search " popup="OmniQ Spotlight Search [Alt+Space]">exec:/usr/local/bin/omniq-spotlight</TrayButton>
+        <Spacer width="10"/>
+
+        <TaskList maxwidth="240" labeled="true"/>
+
+        <Dock/>
+        <Spacer width="6"/>
+        <TrayButton icon="nightlight_16.png" popup="Night Light [Click for Control Center]">exec:/usr/local/bin/omniq-control-panel</TrayButton>
+        <Spacer width="4"/>
+        <TrayButton icon="notifications_16.png" popup="Quantum &amp; Cryo Alerts [Click for Control Center]">exec:/usr/local/bin/omniq-control-panel</TrayButton>
+        <Spacer width="4"/>
+        <TrayButton icon="audio_16.png" popup="Audio &amp; Volume [Click for Control Center]">exec:/usr/local/bin/omniq-control-panel</TrayButton>
+        <Spacer width="4"/>
+        <TrayButton icon="wifi_16.png" popup="Network &amp; Wi-Fi [Click for Control Center]">exec:/usr/local/bin/omniq-control-panel</TrayButton>
+        <Spacer width="4"/>
+        <TrayButton icon="bluetooth_16.png" popup="Bluetooth [Click for Control Center]">exec:/usr/local/bin/omniq-control-panel</TrayButton>
+        <Spacer width="4"/>
+        <TrayButton icon="battery_16.png" popup="Power &amp; Tri-Compute Synergy [Click for Control Center]">exec:/usr/local/bin/omniq-control-panel</TrayButton>
+        <Spacer width="4"/>
+        <TrayButton icon="control_center_16.png" popup="OmniQ Control Center [F8]">exec:/usr/local/bin/omniq-control-panel</TrayButton>
+        <Spacer width="4"/>
+        <TrayButton icon="lock_16.png" popup="Lock Quantum Session [Ctrl+Alt+L]">exec:/usr/local/bin/omniq-screensaver --lock</TrayButton>
+        <Spacer width="6"/>
+
+        <Clock format=" %a %b %d  %H:%M "><Button mask="123">exec:/usr/local/bin/omniq-control-panel</Button></Clock>
+        <Spacer width="6"/>
+        <TrayButton icon="power_16.png" popup="Power Off / Lock / Reboot">root:2</TrayButton>
+    </Tray>
+
+    <!-- 7 Numbered Quantum & OS Root Menu Categories -->
+    <RootMenu onroot="1">
+        <Menu label="01 - QPU Telemetry &amp; Cryo Control" icon="cockpit.png">
+            <Program label="Cryogenic Dilution Lab &amp; SCPI/Modbus Console" icon="cryo_lab.png">/usr/local/bin/omniq-cryo-lab</Program>
+            <Program label="OmniQ Quantum Mission Cockpit" icon="cockpit.png">/usr/local/bin/omniq-gui</Program>
+            <Program label="3D Cryogenic QPU &amp; Heavy-Hex Visualizer" icon="qpu_3d.png">/usr/local/bin/omniq-qpu-3d</Program>
+            <Program label="QPU-SMI Live Telemetry HUD" icon="terminal.png">/usr/local/bin/omniq-terminal -e "/usr/local/bin/qpu-smi --watch"</Program>
+            <Program label="QPU Daemon &amp; QMMU Status" icon="cockpit.png">/usr/local/bin/omniq-terminal -e "/usr/local/bin/omniq-ctl status; exec bash"</Program>
+            <Program label="RFSoC &amp; Network Ports Console" icon="ports.png">/usr/local/bin/omniq-ports</Program>
+        </Menu>
+        <Menu label="02 - Quantum Circuits &amp; Hilbert Space" icon="circuit_maker.png">
+            <Program label="Quantum Circuit Maker Studio" icon="circuit_maker.png">/usr/local/bin/omniq-circuit-maker</Program>
+            <Program label="Hilbert Space &amp; 3D Bloch Explorer" icon="hilbert.png">/usr/local/bin/omniq-hilbert-space</Program>
+            <Program label="Quantum Statevector Step Debugger" icon="debugger.png">/usr/local/bin/omniq-debugger</Program>
+            <Program label="OpenQASM Code &amp; Script Editor" icon="editor.png">/usr/local/bin/omniq-edit</Program>
+        </Menu>
+        <Menu label="03 - Quantum Error Correction (QEC)" icon="qec.png">
+            <Program label="Surface Code MWPM Syndrome Decoder" icon="qec.png">/usr/local/bin/omniq-qec</Program>
+            <Program label="GPUDirect-QPU Sub-600ns Loop Monitor" icon="cockpit.png">/usr/local/bin/omniq-gui</Program>
+        </Menu>
+        <Menu label="04 - Hybrid Algorithms &amp; VQE Chemistry" icon="vqe_chem.png">
+            <Program label="VQE Molecular Chemistry Lab" icon="vqe_chem.png">/usr/local/bin/omniq-vqe-chem</Program>
+            <Program label="Tri-Compute Pipeline Cockpit" icon="cockpit.png">/usr/local/bin/omniq-gui</Program>
+        </Menu>
+        <Menu label="05 - Post-Quantum Security &amp; PQC Audit" icon="pqc_audit.png">
+            <Program label="NIST PQC &amp; SOC 2 Compliance Auditor" icon="pqc_audit.png">/usr/local/bin/omniq-pqc-audit</Program>
+            <Program label="Active Ports &amp; Socket Boundary Inspector" icon="ports.png">/usr/local/bin/omniq-ports</Program>
+        </Menu>
+        <Menu label="06 - Files, Circuits &amp; System Tools" icon="settings.png">
+            <Program label="Quantum Circuits Explorer (/root/circuits)" icon="circuits_folder.png">/usr/local/bin/omniq-files /root/circuits</Program>
+            <Program label="OmniQ File Manager (/root)" icon="files.png">/usr/local/bin/omniq-files /root</Program>
+            <Program label="Quantum Documentation &amp; Web Browser" icon="browser.png">/usr/local/bin/omniq-browser</Program>
+            <Program label="System Settings &amp; Hardware Control" icon="settings.png">/usr/local/bin/omniq-settings</Program>
+            <Program label="Real-Time Task &amp; SCHED_FIFO Monitor" icon="tasks.png">/usr/local/bin/omniq-tasks</Program>
+            <Program label="NVMe &amp; Partition Storage Manager" icon="disks.png">/usr/local/bin/omniq-disks</Program>
+            <Program label="Permanent Disk OS Installer" icon="installer.png">/usr/local/bin/omniq-installer</Program>
+            <Program label="Quantum Wallpaper Switcher" icon="wallpaper.png">/usr/local/bin/omniq-wallpaper --gui</Program>
+            <Program label="HDMI &amp; Multi-Monitor Switcher" icon="screensaver.png">/usr/local/bin/omniq-display-switcher</Program>
+            <Program label="Screen Capture Utility" icon="screenshot.png">/usr/local/bin/omniq-screenshot</Program>
+            <Program label="Quantum Entanglement Screensaver" icon="screensaver.png">/usr/local/bin/omniq-screensaver --preview</Program>
+            <Program label="Power &amp; Session Control" icon="power.png">/usr/local/bin/omniq-power</Program>
+        </Menu>
+        <Menu label="07 - Terminal &amp; RT Diagnostics" icon="terminal.png">
+            <Program label="OmniQ Power Terminal" icon="terminal.png">/usr/local/bin/omniq-terminal</Program>
+            <Program label="QPU-SMI Snapshot" icon="terminal.png">/usr/local/bin/omniq-terminal -e "/usr/local/bin/qpu-smi; exec bash"</Program>
+            <Program label="Kernel PREEMPT_RT Identity (uname -a)" icon="terminal.png">/usr/local/bin/omniq-terminal -e "uname -a; exec bash"</Program>
+            <Program label="Spotlight Quick Search" icon="spotlight.png">/usr/local/bin/omniq-spotlight</Program>
+        </Menu>
+        <Separator/>
+        <Program label="Lock Quantum Session [Ctrl+Alt+L]" icon="lock.png">/usr/local/bin/omniq-screensaver --lock</Program>
+        <Restart label="Reload OmniQ Desktop" icon="settings.png"/>
+        <Program label="Power Off System" icon="power.png">/usr/local/bin/omniq-power --poweroff</Program>
+    </RootMenu>
+
+    <!-- Power Menu (onroot=2) -->
+    <RootMenu onroot="2">
+        <Program label="Lock Quantum Session [Ctrl+Alt+L]" icon="lock.png">/usr/local/bin/omniq-screensaver --lock</Program>
+        <Program label="Suspend (ACPI S3)" icon="battery.png">/usr/local/bin/omniq-power --suspend</Program>
+        <Restart label="Reload OmniQ Desktop" icon="settings.png"/>
+        <Program label="Reboot OmniQ-OS" icon="settings.png">/usr/local/bin/omniq-power --reboot</Program>
+        <Program label="Power Off (Shutdown)" icon="power.png">/usr/local/bin/omniq-power --poweroff</Program>
+    </RootMenu>
+
+    <!-- Desktop Context Menu (onroot=3) -->
+    <RootMenu onroot="3">
+        <Program label="Spotlight Search [Alt+Space]" icon="spotlight.png">/usr/local/bin/omniq-spotlight</Program>
+        <Program label="Open Power Terminal" icon="terminal.png">/usr/local/bin/omniq-terminal</Program>
+        <Program label="Quantum Circuit Maker" icon="circuit_maker.png">/usr/local/bin/omniq-circuit-maker</Program>
+        <Program label="Hilbert Space Explorer" icon="hilbert.png">/usr/local/bin/omniq-hilbert-space</Program>
+        <Program label="Quantum Mission Cockpit" icon="cockpit.png">/usr/local/bin/omniq-gui</Program>
+        <Program label="Surface Code QEC Decoder" icon="qec.png">/usr/local/bin/omniq-qec</Program>
+        <Program label="VQE Molecular Chemistry" icon="vqe_chem.png">/usr/local/bin/omniq-vqe-chem</Program>
+        <Program label="3D Cryogenic QPU Viewer" icon="qpu_3d.png">/usr/local/bin/omniq-qpu-3d</Program>
+        <Program label="Open Quantum Circuits (/root/circuits)" icon="circuits_folder.png">/usr/local/bin/omniq-files /root/circuits</Program>
+        <Program label="System Settings" icon="settings.png">/usr/local/bin/omniq-settings</Program>
+        <Program label="Change Wallpaper" icon="wallpaper.png">/usr/local/bin/omniq-wallpaper --gui</Program>
+        <Separator/>
+        <Program label="Lock Quantum Session" icon="lock.png">/usr/local/bin/omniq-screensaver --lock</Program>
+        <Program label="Power Off System" icon="power.png">/usr/local/bin/omniq-power --poweroff</Program>
+    </RootMenu>
+
+    <!-- Window Border & Titlebar Styling -->
+    <WindowStyle>
+        <Font>DejaVu Sans-9:bold</Font>
+        <Width>1</Width>
+        <Height>22</Height>
+        <Corner>4</Corner>
+        <Foreground>#EDEAF5</Foreground>
+        <Background>#141126</Background>
+        <Outline>#8A4FFF</Outline>
+        <Active>
+            <Foreground>#FFFFFF</Foreground>
+            <Background>#1A1530:#141126</Background>
+            <Outline>#00E5FF</Outline>
+            <Title>
+                <Text>#FFFFFF</Text>
+                <TitleForeground>#FFFFFF</TitleForeground>
+                <TitleBackground>#8A4FFF:#00E5FF</TitleBackground>
+            </Title>
+        </Active>
+        <Opacity>0.96</Opacity>
+    </WindowStyle>
+
+    <!-- Top Bar Styling -->
+    <TrayStyle>
+        <Font>DejaVu Sans-9:bold</Font>
+        <Background>#0D0B18:#1A1530</Background>
+        <Foreground>#00E5FF</Foreground>
+        <Opacity>0.93</Opacity>
+    </TrayStyle>
+
+    <TaskListStyle>
+        <Font>DejaVu Sans-9</Font>
+        <Active>
+            <Foreground>#FFFFFF</Foreground>
+            <Background>#1A1530:#3D1E6D</Background>
+        </Active>
+        <Foreground>#9E97B8</Foreground>
+        <Background>#141126</Background>
+    </TaskListStyle>
+
+    <MenuStyle>
+        <Font>DejaVu Sans-9</Font>
+        <Foreground>#EDEAF5</Foreground>
+        <Background>#141126</Background>
+        <Active>
+            <Foreground>#FFFFFF</Foreground>
+            <Background>#8A4FFF</Background>
+        </Active>
+        <Opacity>0.96</Opacity>
+    </MenuStyle>
+
+    <!-- Application Window Icon Groups -->
+    <Group>
+        <Class>Omniq-gui</Class>
+        <Class>omniq-gui</Class>
+        <Icon>cockpit_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-cryo-lab</Class>
+        <Class>omniq-cryo-lab</Class>
+        <Icon>cryo_lab_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-hilbert-space</Class>
+        <Class>omniq-hilbert-space</Class>
+        <Icon>hilbert_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-circuit-maker</Class>
+        <Class>omniq-circuit-maker</Class>
+        <Icon>circuit_maker_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-qec</Class>
+        <Class>omniq-qec</Class>
+        <Icon>qec_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-vqe-chem</Class>
+        <Class>omniq-vqe-chem</Class>
+        <Icon>vqe_chem_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-debugger</Class>
+        <Class>omniq-debugger</Class>
+        <Icon>debugger_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-qpu-3d</Class>
+        <Class>omniq-qpu-3d</Class>
+        <Icon>qpu_3d_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-pqc-audit</Class>
+        <Class>omniq-pqc-audit</Class>
+        <Icon>pqc_audit_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-settings</Class>
+        <Class>omniq-settings</Class>
+        <Icon>settings_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-tasks</Class>
+        <Class>omniq-tasks</Class>
+        <Icon>tasks_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-files</Class>
+        <Class>omniq-files</Class>
+        <Name>omniq-files</Name>
+        <Icon>files_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-edit</Class>
+        <Class>omniq-edit</Class>
+        <Icon>editor_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-browser</Class>
+        <Class>omniq-browser</Class>
+        <Icon>browser_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-ports</Class>
+        <Class>omniq-ports</Class>
+        <Icon>ports_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-disks</Class>
+        <Class>omniq-disks</Class>
+        <Icon>disks_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-installer</Class>
+        <Class>omniq-installer</Class>
+        <Icon>installer_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-screenshot</Class>
+        <Class>omniq-screenshot</Class>
+        <Icon>screenshot_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-wallpaper</Class>
+        <Class>omniq-wallpaper</Class>
+        <Icon>wallpaper_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-screensaver</Class>
+        <Class>omniq-screensaver</Class>
+        <Icon>screensaver_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-power</Class>
+        <Class>omniq-power</Class>
+        <Icon>power_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-display-switcher</Class>
+        <Class>omniq-display-switcher</Class>
+        <Icon>screensaver_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Terminator</Class>
+        <Class>terminator</Class>
+        <Class>XTerm</Class>
+        <Class>xterm</Class>
+        <Icon>terminal_16.png</Icon>
+    </Group>
+
+    <!-- Overlay Rules for Spotlight, Control Panel, and App Launcher -->
+    <Group>
+        <Class>Omniq-spotlight</Class>
+        <Class>omniq-spotlight</Class>
+        <Option>nolist</Option>
+        <Option>noborder</Option>
+        <Option>notitle</Option>
+        <Option>layer:top</Option>
+        <Icon>spotlight_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-control-panel</Class>
+        <Class>omniq-control-panel</Class>
+        <Option>nolist</Option>
+        <Option>noborder</Option>
+        <Option>notitle</Option>
+        <Option>layer:top</Option>
+        <Icon>control_center_16.png</Icon>
+    </Group>
+    <Group>
+        <Class>Omniq-app-launcher</Class>
+        <Class>omniq-app-launcher</Class>
+        <Option>nolist</Option>
+        <Option>noborder</Option>
+        <Option>notitle</Option>
+        <Option>layer:top</Option>
+        <Icon>apps_grid_16.png</Icon>
+    </Group>
+
+    <!-- Borderless Desktop Workspace Layer Rules -->
+    <Group>
+        <Class>OmniqDesktop</Class>
+        <Class>Omniqdesktop</Class>
+        <Option>nolist</Option>
+        <Option>noborder</Option>
+        <Option>notitle</Option>
+        <Option>sticky</Option>
+        <Option>layer:below</Option>
+    </Group>
+    <Group>
+        <Name>omniqDesktop</Name>
+        <Name>omniqdesktop</Name>
+        <Option>nolist</Option>
+        <Option>noborder</Option>
+        <Option>notitle</Option>
+        <Option>sticky</Option>
+        <Option>layer:below</Option>
+    </Group>
+    <Group>
+        <Title>OmniQ Desktop Workspace</Title>
+        <Option>nolist</Option>
+        <Option>noborder</Option>
+        <Option>notitle</Option>
+        <Option>sticky</Option>
+        <Option>layer:below</Option>
+    </Group>
+
+    <!-- Global Keyboard Shortcuts -->
+    <Key mask="A" key="space">exec:/usr/local/bin/omniq-spotlight</Key>
+    <Key key="F1">exec:/usr/local/bin/omniq-app-launcher</Key>
+    <Key key="F2">exec:/usr/local/bin/omniq-terminal</Key>
+    <Key key="F3">exec:/usr/local/bin/omniq-files /root/circuits</Key>
+    <Key key="F4">exec:/usr/local/bin/omniq-hilbert-space</Key>
+    <Key key="F5">exec:/usr/local/bin/omniq-gui</Key>
+    <Key key="F6">exec:/usr/local/bin/omniq-circuit-maker</Key>
+    <Key key="F7">exec:/usr/local/bin/omniq-settings</Key>
+    <Key key="F8">exec:/usr/local/bin/omniq-control-panel</Key>
+    <Key key="F9">exec:/usr/local/bin/omniq-qec</Key>
+    <Key key="F10">exec:/usr/local/bin/omniq-cryo-lab</Key>
+    <Key mask="CA" key="t">exec:/usr/local/bin/omniq-terminal</Key>
+    <Key mask="CA" key="h">exec:/usr/local/bin/omniq-hilbert-space</Key>
+    <Key mask="CA" key="m">exec:/usr/local/bin/omniq-circuit-maker</Key>
+    <Key mask="CA" key="c">exec:/usr/local/bin/omniq-gui</Key>
+    <Key mask="CA" key="p">exec:/usr/local/bin/omniq-control-panel</Key>
+    <Key mask="CA" key="l">exec:/usr/local/bin/omniq-screensaver --lock</Key>
+    <Key key="Print">exec:/usr/local/bin/omniq-screenshot</Key>
+    <Key mask="A" key="F1">root:1</Key>
+
+    <!-- Navigation & Window Controls -->
+    <Key key="Up">up</Key>
+    <Key key="Down">down</Key>
+    <Key key="Right">right</Key>
+    <Key key="Left">left</Key>
+    <Key key="Escape">escape</Key>
+    <Key mask="A" key="Tab">nextstacked</Key>
+    <Key mask="A" key="F4">close</Key>
+    <Key mask="A" key="F10">maximize</Key>
+</JWM>

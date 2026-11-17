@@ -1,0 +1,11 @@
+# ==============================================================================
+# OmniQ-OS: udev Quantum Processing Unit (QPU) Accelerator Device Node Rules
+# Grants the 'quantum' & 'accel' groups zero-copy access to /dev/accel/qpu*
+# ==============================================================================
+
+# Linux Compute Accelerator QPU Device Nodes (RFSoC PCIe / Virt-QPU)
+KERNEL=="qpu*", SUBSYSTEM=="accel", MODE="0660", GROUP="quantum"
+KERNEL=="qpu[0-9]*", MODE="0660", GROUP="quantum", SYMLINK+="accel/%k"
+
+# Cryostat & RFSoC Low-Latency Serial Telemetry Console
+KERNEL=="ttyS0", MODE="0660", GROUP="quantum"

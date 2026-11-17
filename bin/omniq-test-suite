@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""
+OmniQ-OS Unified Automated Verification Runner (bin/omniq-test-suite)
+Discovers and executes all C UAPI, Python SDK, C++20 Core, Hilbert/Circuit Maker,
+PQC/SOC 2 Secret API, and Desktop/ISO verification suites.
+"""
+
+import os
+import subprocess
+import sys
+import unittest
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+for p in [
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    os.path.join(REPO_ROOT, "tests"),
+]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+
+def main() -> int:
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("Usage: omniq-test-suite [--all | --core | --quantum | --pqc | --system | --test]")
+        return 0
+
+    if "--test" in sys.argv and "--all" not in sys.argv:
+        print("[PASS] omniq-test-suite runner ready.")
+        return 0
+
+    print("======================================================================")
+    print(" OmniQ-OS Master End-to-End Automated Test Suite                      ")
+    print("======================================================================")
+
+    # 1. Run native C UAPI harness if built
+    c_test = os.path.join(REPO_ROOT, "tests", "test_qpu_uapi")
+    if os.path.exists(c_test) and os.access(c_test, os.X_OK):
+        rc = subprocess.run([c_test], cwd=os.path.join(REPO_ROOT, "tests")).returncode
+        if rc != 0:
+            return rc
+
+    # 2. Discover unittest suites in tests/
+    loader = unittest.TestLoader()
+    pattern = "test_*.py"
+    if "--core" in sys.argv:
+        pattern = "test_omniq_core.py"
+    elif "--quantum" in sys.argv:
+        pattern = "test_hilbert_and_circuit_maker.py"
+    elif "--pqc" in sys.argv:
+        pattern = "test_pqc_and_secret_api.py"
+    elif "--system" in sys.argv:
+        pattern = "test_omniq_system_and_desktop.py"
+
+    suite = loader.discover(os.path.join(REPO_ROOT, "tests"), pattern=pattern)
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

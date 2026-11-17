@@ -114,6 +114,12 @@ struct qpu_device {
 
 	/* Fallback Simulator State */
 	bool is_emulated;
+
+	/* Cryogenic Thermal Safety & RF Microwave Interlock */
+	bool  interlock_tripped;
+	bool  rf_dac_clamped;
+	__u64 interlock_trip_count;
+	char  interlock_reason[64];
 };
 
 /* Global Device Singleton */
@@ -123,6 +129,9 @@ extern struct qpu_device *g_qpu_dev;
 int  qpu_pci_init(struct qpu_device *qdev);
 void qpu_pci_cleanup(struct qpu_device *qdev);
 
+int  qpu_dma_init(struct qpu_device *qdev);
+void qpu_dma_cleanup(struct qpu_device *qdev);
+
 int  qpu_sysfs_init(struct qpu_device *qdev);
 void qpu_sysfs_cleanup(struct qpu_device *qdev);
 
@@ -131,6 +140,7 @@ int  qpu_qmmu_alloc(struct qpu_device *qdev, struct qpu_alloc_request *req, __u3
 int  qpu_qmmu_free(struct qpu_device *qdev, struct qpu_free_request *req, __u32 pid);
 
 int  qpu_fallback_init(struct qpu_device *qdev);
+void qpu_fallback_cleanup(struct qpu_device *qdev);
 int  qpu_fallback_submit_job(struct qpu_device *qdev, struct qpu_job_submission *job);
 int  qpu_fallback_read_results(struct qpu_device *qdev, struct qpu_results_read *res);
 

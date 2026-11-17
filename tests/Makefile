@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-CC ?= clang
+CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -pthread -I../kernel/include/uapi -I../kernel/drivers/accel/qpu
 
 SRCS = test_qpu_uapi.c \
@@ -12,7 +12,7 @@ TARGET = test_qpu_uapi
 all: $(TARGET)
 
 $(TARGET): $(SRCS)
-	$(CC) $(CFLAGS) -o $@ $(SRCS)
+	$(CC) $(CFLAGS) -o $@ $(SRCS) -lpthread
 
 test: $(TARGET)
 	./$(TARGET)
@@ -21,4 +21,3 @@ clean:
 	rm -f $(TARGET)
 
 .PHONY: all test clean
-

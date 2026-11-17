@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""
+OmniQ-OS Quantum Documentation & QASM Dataset Browser (bin/omniq-browser)
+- PyGObject GTK3 + WebKit2GTK (with native GTK3 offline fallback)
+- Built-in Quantum Knowledge Hub & Interactive Local circuits/ QASM Dataset Explorer
+- Symlinked as bin/chromium and bin/chromium-browser
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.parse
+from typing import Any, Dict, List, Optional, Tuple
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+for _p in reversed([
+    os.path.join(REPO_ROOT, "runtime", "python"),
+    os.path.join(REPO_ROOT, "src"),
+    "/opt/omniq/src",
+    "/usr/lib/python3/dist-packages",
+]):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from omniq.circuit import Circuit, Statevector
+
+QUANTUM_PORTALS: List[Tuple[str, str, str]] = [
+    ("OmniQ Hub", "omniq://home", "Built-in OmniQ-OS Architecture & QASM Dataset Explorer"),
+    ("OpenQASM 3.0", "https://openqasm.com", "OpenQASM 3.0 Language Specification"),
+    ("arXiv quant-ph", "https://arxiv.org/list/quant-ph/recent", "Quantum Physics Preprints"),
+    ("NIST PQC", "https://csrc.nist.gov/projects/post-quantum-cryptography", "FIPS 203 ML-KEM & FIPS 204 ML-DSA"),
+    ("DuckDuckGo", "https://duckduckgo.com", "Private Web Search"),
+]
+
+DARK_GTK_CSS = b"""
+window, .main-bg {
+    background-color: #0D0B18;
+    color: #ECF2FF;
+    font-family: "DejaVu Sans", sans-serif;
+}
+.browser-toolbar {
+    background: linear-gradient(to right, #110E22, #1A1530);
+    border-bottom: 1px solid #8A4FFF;
+    padding: 6px 10px;
+}
+.bookmarks-bar {
+    background-color: #0F0C1D;
+    border-bottom: 1px solid rgba(0, 229, 255, 0.25);
+    padding: 4px 10px;
+}
+button.nav-btn {
+    background-image: none;
+    background-color: #1A1530;
+    border: 1px solid rgba(138, 79, 255, 0.45);
+    border-radius: 5px;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 5px 10px;
+}
+button.nav-btn:hover {
+    background-color: #281E4A;
+    border-color: #00E5FF;
+    color: #00E5FF;
+}
+button.bm-btn {
+    background-image: none;
+    background-color: #141126;
+    border: 1px solid rgba(138, 79, 255, 0.35);
+    border-radius: 4px;
+    color: #C7D2FE;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 3px 8px;
+}
+button.bm-btn:hover {
+    border-color: #00E5FF;
+    color: #00E5FF;
+}
+button.local-btn {
+    background-image: none;
+    background-color: #0E2926;
+    border: 1px solid #00FF9D;
+    border-radius: 4px;
+    color: #00FF9D;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 3px 8px;
+}
+entry.url-entry {
+    background-image: none;
+    background-color: #141126;
+    color: #00E5FF;
+    border: 1px solid rgba(138, 79, 255, 0.45);
+    border-radius: 5px;
+    padding: 5px 10px;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+}
+.statusbar {
+    background-color: #100D1F;
+    border-top: 1px solid rgba(138, 79, 255, 0.25);
+    color: #94A3B8;
+    font-size: 11px;
+    padding: 4px 10px;
+}
+.fallback-view, .fallback-view text {
+    background-color: #0B0A14;
+    color: #ECF2FF;
+    font-family: "DejaVu Sans Mono", monospace;
+    font-size: 12px;
+}
+"""
+
+
+def index_circuit_datasets() -> List[Dict[str, Any]]:
+    """Indexes bundled .qasm and .json files in circuits/ with quantum invariants."""
+    cdir = os.path.join(REPO_ROOT, "circuits")
+    if not os.path.isdir(cdir) and os.path.isdir("/opt/omniq/circuits"):
+        cdir = "/opt/omniq/circuits"
+    items: List[Dict[str, Any]] = []
+    if not os.path.isdir(cdir):
+        return items
+
+    for fn in sorted(os.listdir(cdir)):
+        fp = os.path.join(cdir, fn)
+        if not os.path.isfile(fp) or not (fn.endswith(".qasm") or fn.endswith(".json")):
+            continue
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                raw = f.read()
+            if fn.endswith(".qasm"):
+                qasm_str = raw
+            else:
+                doc = json.loads(raw)
+                qasm_str = str(doc.get("qasm", ""))
+            if not qasm_str:
+                continue
+            circ = Circuit.from_qasm(qasm_str)
+            sv = circ.execute()
+            ent = sv.entanglement_entropy() if isinstance(sv, Statevector) else 0.0
+            items.append({
+                "filename": fn,
+                "filepath": fp,
+                "num_qubits": circ.num_qubits,
+                "gate_count": len(circ.gates),
+                "entanglement_bits": round(float(ent), 4),
+                "qasm": qasm_str,
+            })
+        except Exception:
+            continue
+    return items
+
+
+def build_quantum_hub_html() -> str:
+    """Builds the self-contained dark Obsidian HTML Quantum Documentation & Dataset Hub."""
+    datasets = index_circuit_datasets()
+    cards_html = []
+    for ds in datasets:
+        fn_esc = html.escape(ds["filename"])
+        fp_q = urllib.parse.quote(ds["filepath"])
+        qasm_esc = html.escape(ds["qasm"].strip())
+        cards_html.append(f"""
+        <div class="card">
+          <div class="card-hdr">
+            <span class="fname">{fn_esc}</span>
+            <span class="badge">{ds['num_qubits']} Qubits | {ds['gate_count']} Gates | S_A = {ds['entanglement_bits']:.3f} bits</span>
+          </div>
+          <pre>{qasm_esc}</pre>
+          <div class="actions">
+            <a class="btn cyan" href="omniq://open-editor?path={fp_q}">Open in OmniQ Edit</a>
+            <a class="btn violet" href="omniq://open-maker?path={fp_q}">Circuit Maker</a>
+            <a class="btn mint" href="omniq://open-hilbert?path={fp_q}">Hilbert Explorer</a>
+            <a class="btn" href="omniq://open-debugger?path={fp_q}">Step Debugger</a>
+          </div>
+        </div>
+        """)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OmniQ-OS Quantum Documentation & QASM Dataset Hub</title>
+<style>
+  body {{
+    background-color: #0D0B18;
+    color: #ECF2FF;
+    font-family: "DejaVu Sans", sans-serif;
+    margin: 0;
+    padding: 22px 28px;
+  }}
+  .hero {{
+    background: linear-gradient(135deg, #16112E, #0D2235);
+    border: 1px solid #00E5FF;
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 20px;
+  }}
+  h1 {{ margin: 0 0 6px 0; font-size: 20px; color: #00E5FF; }}
+  h2 {{ font-size: 15px; color: #C084FC; margin-top: 22px; border-bottom: 1px solid rgba(138,79,255,0.35); padding-bottom: 6px; }}
+  p {{ font-size: 13px; color: #CBD5E1; line-height: 1.5; margin: 6px 0; }}
+  .spec-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; margin-top: 12px; }}
+  .spec-box {{ background: #141126; border: 1px solid rgba(138,79,255,0.38); border-radius: 8px; padding: 12px; }}
+  .spec-box b {{ color: #00FF9D; font-size: 12px; display: block; margin-bottom: 4px; }}
+  .card {{
+    background: #141126;
+    border: 1px solid rgba(138,79,255,0.38);
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }}
+  .card-hdr {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }}
+  .fname {{ color: #00E5FF; font-weight: bold; font-family: "DejaVu Sans Mono", monospace; font-size: 14px; }}
+  .badge {{ background: rgba(0,229,255,0.14); border: 1px solid #00E5FF; color: #00E5FF; border-radius: 4px; padding: 2px 8px; font-size: 11px; }}
+  pre {{
+    background: #090812;
+    color: #00FF9D;
+    padding: 10px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 11px;
+    font-family: "DejaVu Sans Mono", monospace;
+    max-height: 165px;
+  }}
+  .actions {{ display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }}
+  .btn {{
+    display: inline-block;
+    padding: 5px 11px;
+    border-radius: 5px;
+    text-decoration: none;
+    font-size: 11px;
+    font-weight: bold;
+    background: #1A1530;
+    color: #ECF2FF;
+    border: 1px solid #8A4FFF;
+  }}
+  .btn.cyan {{ border-color: #00E5FF; color: #00E5FF; }}
+  .btn.violet {{ border-color: #C084FC; color: #C084FC; }}
+  .btn.mint {{ border-color: #00FF9D; color: #00FF9D; }}
+</style>
+</head>
+<body>
+  <div class="hero">
+    <h1>OmniQ-OS Quantum Documentation &amp; OpenQASM 3.0 Dataset Hub</h1>
+    <p>Deterministic PREEMPT_RT Quantum Operating System — 127-Qubit Heavy-Hex Transmon Architecture,
+       GPUDirect-QPU &lt; 600 ns Surface-Code MWPM QEC, and NIST FIPS 203/204 Post-Quantum Security.</p>
+  </div>
+
+  <h2>System Architecture Quick Reference</h2>
+  <div class="spec-grid">
+    <div class="spec-box">
+      <b>Kernel Accelerator (/dev/accel/qpu0)</b>
+      <p>Zero-copy ioctl UAPI (libomniq_qpu.so) with QMMU multi-hop crosstalk guard bands and &lt; 50.0 mK RF DAC clamp.</p>
+    </div>
+    <div class="spec-box">
+      <b>Real-Time Daemon (omniqd :9090)</b>
+      <p>SCHED_FIFO 95 service pinned to isolated cores [2, 3] with mlockall and POSIX SHM telemetry rings.</p>
+    </div>
+    <div class="spec-box">
+      <b>NIST Post-Quantum Vault (:9443)</b>
+      <p>C++20 3744-byte 7-modality frame protected by ML-KEM-768, ML-DSA-65, and tamper-evident SHA-256 hash chain.</p>
+    </div>
+  </div>
+
+  <h2>Bundled OpenQASM 3.0 &amp; Hilbert State Datasets ({len(datasets)} Verified Circuits)</h2>
+  {"".join(cards_html)}
+</body>
+</html>
+"""
+
+
+def resolve_sibling_bin(name: str) -> str:
+    local = os.path.join(REPO_ROOT, "bin", name)
+    if os.path.isfile(local):
+        return local
+    for p in [f"/usr/local/bin/{name}", f"/usr/bin/{name}"]:
+        if os.path.isfile(p):
+            return p
+    return shutil.which(name) or local
+
+
+def handle_omniq_uri(uri: str) -> bool:
+    if not uri.startswith("omniq://"):
+        return False
+    parsed = urllib.parse.urlparse(uri)
+    qs = urllib.parse.parse_qs(parsed.query)
+    fpath = qs.get("path", [""])[0]
+    target_map = {
+        "open-editor": "omniq-edit",
+        "open-maker": "omniq-circuit-maker",
+        "open-hilbert": "omniq-hilbert-space",
+        "open-debugger": "omniq-debugger",
+    }
+    tool = target_map.get(parsed.netloc)
+    if tool:
+        exe = resolve_sibling_bin(tool)
+        cmd = [sys.executable, exe] if os.path.isfile(exe) else [exe]
+        if fpath and os.path.exists(fpath):
+            cmd.append(fpath)
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    return False
+
+
+def launch_gui(start_url: Optional[str] = None) -> None:
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    webkit_mod = None
+    try:
+        gi.require_version("WebKit2", "4.1")
+        from gi.repository import WebKit2 as _WK
+        webkit_mod = _WK
+    except Exception:
+        try:
+            gi.require_version("WebKit2", "4.0")
+            from gi.repository import WebKit2 as _WK
+            webkit_mod = _WK
+        except Exception:
+            webkit_mod = None
+
+    from gi.repository import Gdk, GLib, Gtk
+
+    GLib.set_prgname("omniq-browser")
+    GLib.set_application_name("OmniQ Quantum Browser")
+
+    gtk_settings = Gtk.Settings.get_default()
+    if gtk_settings is not None:
+        gtk_settings.set_property("gtk-application-prefer-dark-theme", True)
+
+    provider = Gtk.CssProvider()
+    provider.load_from_data(DARK_GTK_CSS)
+    screen = Gdk.Screen.get_default()
+    if screen is not None:
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+    class OmniQBrowserWindow(Gtk.Window):
+        def __init__(self, initial: Optional[str] = None):
+            super().__init__(title="OmniQ Browser — Quantum Documentation & QASM Dataset Explorer")
+            self.set_default_size(1060, 700)
+            self.set_position(Gtk.WindowPosition.CENTER)
+
+            vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+            vbox.get_style_context().add_class("main-bg")
+            self.add(vbox)
+
+            # Navigation Bar
+            nav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            nav.get_style_context().add_class("browser-toolbar")
+
+            btn_back = Gtk.Button(label="<")
+            btn_back.get_style_context().add_class("nav-btn")
+            btn_back.connect("clicked", lambda _b: self.webview.go_back() if self.webview else None)
+            nav.pack_start(btn_back, False, False, 0)
+
+            btn_fwd = Gtk.Button(label=">")
+            btn_fwd.get_style_context().add_class("nav-btn")
+            btn_fwd.connect("clicked", lambda _b: self.webview.go_forward() if self.webview else None)
+            nav.pack_start(btn_fwd, False, False, 0)
+
+            btn_hub = Gtk.Button(label="Quantum Hub")
+            btn_hub.get_style_context().add_class("nav-btn")
+            btn_hub.connect("clicked", lambda _b: self.navigate("omniq://home"))
+            nav.pack_start(btn_hub, False, False, 0)
+
+            self.url_entry = Gtk.Entry()
+            self.url_entry.get_style_context().add_class("url-entry")
+            self.url_entry.set_placeholder_text("Enter URL, omniq://home, or search query...")
+            self.url_entry.connect("activate", lambda _e: self.navigate(self.url_entry.get_text()))
+            nav.pack_start(self.url_entry, True, True, 0)
+
+            btn_go = Gtk.Button(label="Go")
+            btn_go.get_style_context().add_class("nav-btn")
+            btn_go.connect("clicked", lambda _b: self.navigate(self.url_entry.get_text()))
+            nav.pack_start(btn_go, False, False, 0)
+            vbox.pack_start(nav, False, False, 0)
+
+            # Bookmarks Bar
+            bm = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            bm.get_style_context().add_class("bookmarks-bar")
+            for label, target, tip in QUANTUM_PORTALS:
+                b = Gtk.Button(label=label)
+                b.get_style_context().add_class("bm-btn")
+                b.set_tooltip_text(f"{tip}\n{target}")
+                b.connect("clicked", lambda _btn, u=target: self.navigate(u))
+                bm.pack_start(b, False, False, 0)
+
+            btn_files = Gtk.Button(label="Open Circuits Folder")
+            btn_files.get_style_context().add_class("local-btn")
+            btn_files.connect(
+                "clicked",
+                lambda _b: subprocess.Popen(
+                    [sys.executable, resolve_sibling_bin("omniq-files"), os.path.join(REPO_ROOT, "circuits")],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                ),
+            )
+            bm.pack_end(btn_files, False, False, 0)
+            vbox.pack_start(bm, False, False, 0)
+
+            self.webview = None
+            if webkit_mod is not None:
+                self.webview = webkit_mod.WebView()
+                self.webview.connect("decide-policy", self._on_decide_policy)
+                vbox.pack_start(self.webview, True, True, 0)
+            else:
+                sw = Gtk.ScrolledWindow()
+                self.fallback_text = Gtk.TextView()
+                self.fallback_text.set_editable(False)
+                self.fallback_text.set_monospace(True)
+                self.fallback_text.get_style_context().add_class("fallback-view")
+                sw.add(self.fallback_text)
+                vbox.pack_start(sw, True, True, 0)
+
+            self.status_lbl = Gtk.Label(label="OmniQ Quantum Documentation & Dataset Engine Ready")
+            self.status_lbl.get_style_context().add_class("statusbar")
+            self.status_lbl.set_xalign(0.0)
+            vbox.pack_start(self.status_lbl, False, False, 0)
+
+            self.navigate(initial or "omniq://home")
+
+        def _on_decide_policy(self, _webview, decision, decision_type) -> bool:
+            try:
+                req = decision.get_request()
+                uri = req.get_uri() if req else ""
+                if uri and uri.startswith("omniq://") and uri != "omniq://home":
+                    if handle_omniq_uri(uri):
+                        decision.ignore()
+                        self.status_lbl.set_text(f"Launched OmniQ workbench for {uri}")
+                        return True
+            except Exception:
+                pass
+            return False
+
+        def navigate(self, raw_target: str) -> None:
+            t = (raw_target or "omniq://home").strip()
+            self.url_entry.set_text(t)
+            if t == "omniq://home":
+                hub_html = build_quantum_hub_html()
+                if self.webview is not None:
+                    self.webview.load_html(hub_html, "omniq://home")
+                else:
+                    lines = ["=== OmniQ-OS Quantum Documentation & QASM Dataset Hub ===\n"]
+                    for ds in index_circuit_datasets():
+                        lines.append(
+                            f"* {ds['filename']} ({ds['num_qubits']}Q, {ds['gate_count']} gates, S_A={ds['entanglement_bits']} bits)"
+                        )
+                        lines.append(ds["qasm"])
+                    self.fallback_text.get_buffer().set_text("\n".join(lines))
+                self.status_lbl.set_text("Loaded built-in OmniQ Quantum Documentation & Dataset Hub")
+                return
+
+            if os.path.isfile(t):
+                url = "file://" + os.path.abspath(t)
+            elif "://" in t:
+                url = t
+            elif "." in t and " " not in t:
+                url = "https://" + t
+            else:
+                url = "https://duckduckgo.com/?q=" + urllib.parse.quote_plus(t)
+
+            if self.webview is not None:
+                self.webview.load_uri(url)
+            else:
+                self.fallback_text.get_buffer().set_text(f"Offline Documentation Mode\nTarget URI: {url}")
+            self.status_lbl.set_text(f"Navigating to {url}")
+
+    win = OmniQBrowserWindow(start_url)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+
+def run_self_test() -> int:
+    datasets = index_circuit_datasets()
+    assert len(datasets) >= 7, f"Expected >= 7 indexed circuits, got {len(datasets)}"
+    hub_html = build_quantum_hub_html()
+    assert "bell_pair.qasm" in hub_html
+    assert "ML-KEM-768" in hub_html
+    print(f"[PASS] omniq-browser Quantum Documentation Hub & {len(datasets)} QASM datasets verified.")
+    return 0
+
+
+def main() -> None:
+    if "--test" in sys.argv:
+        sys.exit(run_self_test())
+    url = None
+    for a in sys.argv[1:]:
+        if not a.startswith("-"):
+            url = a
+            break
+    launch_gui(url)
+
+
+if __name__ == "__main__":
+    main()

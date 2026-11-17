@@ -15,6 +15,7 @@
 #include <linux/device.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
 #else
 #include <stdio.h>
 #include <string.h>
@@ -62,6 +63,8 @@ static int __init qpu_module_init(void)
 
 	mutex_init(&g_qpu_dev->lock);
 	spin_lock_init(&g_qpu_dev->qmmu_lock);
+	g_qpu_dev->cryo.threshold_mK = 50000; /* 50.000 mK safety threshold */
+	strscpy(g_qpu_dev->interlock_reason, "NOMINAL", sizeof(g_qpu_dev->interlock_reason));
 
 	/* Allocate device numbers for /dev/accel/qpuX */
 	ret = alloc_chrdev_region(&g_qpu_dev->devt, 0, 1, QPU_DRIVER_NAME);
@@ -79,15 +82,20 @@ static int __init qpu_module_init(void)
 		goto err_unregister_chrdev;
 	}
 
-	g_qpu_dev->qpu_class = class_create("accel");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	g_qpu_dev->qpu_class = class_create("omniq_accel");
+#else
+	g_qpu_dev->qpu_class = class_create(THIS_MODULE, "omniq_accel");
+#endif
 	if (IS_ERR(g_qpu_dev->qpu_class)) {
 		ret = PTR_ERR(g_qpu_dev->qpu_class);
-		pr_err("omniq_qpu: Failed to create sysfs accel class\n");
+		pr_err("omniq_qpu: Failed to create sysfs omniq_accel class\n");
 		goto err_cdev_del;
 	}
 
+	/* "accel!qpu0" instructs devtmpfs/udev to create /dev/accel/qpu0 */
 	g_qpu_dev->dev = device_create(g_qpu_dev->qpu_class, NULL, g_qpu_dev->devt,
-				       g_qpu_dev, "qpu0");
+				       g_qpu_dev, "accel!qpu0");
 	if (IS_ERR(g_qpu_dev->dev)) {
 		ret = PTR_ERR(g_qpu_dev->dev);
 		pr_err("omniq_qpu: Failed to create device node /dev/accel/qpu0\n");
@@ -99,7 +107,7 @@ static int __init qpu_module_init(void)
 
 	/* Probe physical PCIe hardware */
 	ret = qpu_pci_init(g_qpu_dev);
-	if (ret != 0 || g_qpu_dev->operating_state == QPU_STATE_OFFLINE_MAINTENANCE) {
+	if (ret != 0 || !g_qpu_dev->pdev || g_qpu_dev->operating_state == QPU_STATE_OFFLINE_MAINTENANCE) {
 		/*
 		 * Universal Hardware Lifecycle Principle:
 		 * If no physical FPGA PCIe endpoint is present (e.g. developer workstation),
@@ -110,6 +118,7 @@ static int __init qpu_module_init(void)
 	} else {
 		pr_info("omniq_qpu: [Auto-Detect] Physical QPU ONLINE (%s, Mixing Chamber: %u mK)\n",
 			g_qpu_dev->device_name, g_qpu_dev->cryo.temp_mxc_mK);
+		qpu_dma_init(g_qpu_dev);
 		qpu_qmmu_init(g_qpu_dev);
 	}
 
@@ -137,8 +146,10 @@ static void __exit qpu_module_exit(void)
 		return;
 
 	qpu_keepalive_stop(g_qpu_dev);
+	qpu_dma_cleanup(g_qpu_dev);
 	qpu_pci_cleanup(g_qpu_dev);
 	qpu_sysfs_cleanup(g_qpu_dev);
+	qpu_fallback_cleanup(g_qpu_dev);
 
 	device_destroy(g_qpu_dev->qpu_class, g_qpu_dev->devt);
 	class_destroy(g_qpu_dev->qpu_class);

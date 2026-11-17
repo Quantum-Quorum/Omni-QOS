@@ -1,146 +1,159 @@
-# OmniQ-OS: Real-Time Quantum Linux
+# OmniQ-OS: Real-Time Quantum Linux (`x86_64`)
 
 <p align="center">
   <img src="distro/branding/logo.svg" alt="OmniQ-OS Logo" width="600"/>
 </p>
 
 <p align="center">
-  <strong>A Deterministic Hard Real-Time Operating System for Heterogeneous Tri-Compute (CPU + GPU + QPU)</strong>
+  <strong>A Deterministic Hard Real-Time Operating System for Heterogeneous Tri-Compute (CPU + GPU + QPU), Hilbert-Space State Geometry & Visual Quantum Circuit Compilation</strong>
 </p>
 
 <p align="center">
-  <a href="#architecture"><img src="https://img.shields.io/badge/Kernel-Linux%206.8%20PREEMPT__RT-blue.svg" alt="Kernel"/></a>
-  <a href="#tri-compute"><img src="https://img.shields.io/badge/Tri--Compute-CPU%20%2B%20GPU%20%2B%20QPU-cyan.svg" alt="Tri-Compute"/></a>
-  <a href="#qec-latency"><img src="https://img.shields.io/badge/QEC%20Loop-%3C%20600%20ns-green.svg" alt="QEC Latency"/></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-yellow.svg" alt="License"/></a>
+  <a href="#architecture"><img src="https://img.shields.io/badge/Kernel-Linux%207.0.0--43%20PREEMPT__RT-blue.svg" alt="Kernel"/></a>
+  <a href="#tri-compute"><img src="https://img.shields.io/badge/Tri--Compute-CPU%20%2B%20GPU%20%2B%20QPU-00E5FF.svg" alt="Tri-Compute"/></a>
+  <a href="#qec-latency"><img src="https://img.shields.io/badge/QEC%20Loop-%3C%20600%20ns-00FF9D.svg" alt="QEC Latency"/></a>
+  <a href="#pqc-security"><img src="https://img.shields.io/badge/PQC-NIST%20FIPS%20203%2F204%20ML--KEM%2FDSA-8A4FFF.svg" alt="PQC"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0%20%2F%20GPLv2-yellow.svg" alt="License"/></a>
 </p>
 
 ---
 
 ## 1. Vision & Overview
 
-**OmniQ-OS** is an open-source, hard real-time Linux operating system engineered specifically to operate cryogenic Quantum Processing Units (QPUs) alongside classical CPUs and GPUs.
+**OmniQ-OS** is an open-source, bootable `x86_64` Real-Time Quantum Linux distribution engineered to operate cryogenic Quantum Processing Units (QPUs) alongside classical CPUs and GPUs, paired with a native glassmorphic X11 desktop workstation (`Picom` + `JWM` + `OmniqDesktop`) and flagship quantum engineering studios:
 
-Modern quantum computers are largely treated as high-latency cloud batch appliances. This model breaks down for fault-tolerant quantum computing and near-term hybrid algorithms:
-* **The Decoherence Wall**: Physical superconducting transmons have phase coherence times ($T_2$) of $\sim 50\text{--}150\,\mu\text{s}$. Cloud round-trips ($> 10\,\text{ms}$) make real-time syndrome feedback impossible.
-* **Kernel Jitter**: Standard Linux CFS/EEVDF schedulers introduce $10\text{--}50\,\text{ms}$ of non-deterministic jitter, preempting microwave pulse streams and causing phase dephasing.
-* **The No-Cloning Barrier**: By the **Quantum No-Cloning Theorem**, quantum states cannot be swapped to classical RAM or paged to disk. Quantum memory must be managed **spatially**.
-* **The Tri-Compute Latency Bottleneck**: Hybrid quantum-classical computing requires direct, zero-copy communication between QPUs, GPUs (for neural syndrome decoders and gradient optimization), and CPUs.
+* **The Decoherence Wall**: Physical superconducting transmons have phase coherence times ($T_2 \sim 50\text{--}150\,\mu\text{s}$). Cloud round-trips ($> 10\,\text{ms}$) make real-time syndrome feedback impossible.
+* **Deterministic Kernel Scheduling**: Isolates RT QPU/QEC cores (`isolcpus=2,3 nohz_full=2,3 rcu_nocbs=2,3`) to prevent microwave pulse phase dephasing.
+* **Spatial Quantum Memory Management (QMMU)**: Respects the **Quantum No-Cloning Theorem** via spatial qubit lattice partitioning, multi-hop BFS crosstalk guard bands, and `q-keepalived` CPMG/XY-8 dynamic decoupling.
+* **Cryogenic Thermal Safety Interlock (`< 50.000 mK`)**: Hardware/kernel watchdog (`QPU_IOCTL_TRIP_INTERLOCK` / `QPU_IOCTL_SET_CRYO_TEMP`) clamps all RF DAC channels to `0x00` immediately if the dilution refrigerator mixing chamber exceeds `50.0 mK`.
+* **100% Native Linux Stack**: C11 kernel accelerator driver (`omniq_qpu.ko`), POSIX C client library (`libomniq_qpu.so`), C++20 Core Engine & 7-Modality PQC Secret API (`omniq-core`, `omniq-secret-api`), C++17 X11/GLX OpenGL 3D Chandelier & Lattice Viewer (`omniq-qpu-3d`), and GTK3/Cairo + Tcl/Tk native desktop & quantum applications (zero web/JS mocks).
 
-OmniQ-OS solves these challenges through a native Linux Compute Accelerator subsystem (`drivers/accel/qpu/`), **GPUDirect-QPU zero-copy DMA** ($< 600\,\text{ns}$ round trip), a **Quantum Memory Management Unit (QMMU)** with guard-band shielding, and **3-state hardware auto-detection** with transparent simulation fallback.
+### Live Workstation Screenshots (`omniq-os-full.iso` in VirtualBox)
+
+| Glassmorphic X11 Desktop & Dock | Hilbert Space Explorer (`F4`) |
+| :---: | :---: |
+| ![OmniQ-OS Desktop](distro/screenshots/desktop.png) | ![Hilbert Space Explorer](distro/screenshots/hilbert-space-explorer.png) |
+| **Quantum Circuit Maker & IDE (`F6`)** | **5-Tier Quantum Cockpit (`F5`)** |
+| ![Quantum Circuit Maker](distro/screenshots/quantum-circuit-maker.png) | ![Quantum Cockpit](distro/screenshots/quantum-cockpit.png) |
+| **Cryogenic Dilution Lab & SCPI/Modbus Console (`F10`)** | |
+| ![Cryogenic Dilution Lab](distro/screenshots/cryo-dilution-lab.png) | |
 
 ---
 
 ## 2. System Architecture
 
 ```
-+---------------------------------------------------------------------------------------+
-|                                    USER SPACE                                         |
-|                                                                                       |
-|   +-----------------------+   +------------------------+   +----------------------+   |
-|   |       qpu-smi         |   |      libomniq-qpu      |   |  Hybrid AI / VQE App |   |
-|   |  (System Management)  |   |     (POSIX C API)      |   | (PyTorch + cuQuantum)|   |
-|   +-----------------------+   +------------------------+   +----------------------+   |
-|                                            |                                          |
-|                                            v                                          |
-+---------------------------------------------------------------------------------------+
-|                       OMNIQ-OS REAL-TIME KERNEL (PREEMPT_RT)                          |
-|                                                                                       |
-|   +-------------------------------------------------------------------------------+   |
-|   |                     drivers/accel/qpu/ (Unified QPU Subsystem)                |   |
-|   |                                                                               |   |
-|   |   +--------------------------+             +------------------------------+   |   |
-|   |   | Hardware Mode (PCIe/AXI) |             | Fallback Mode: Virt-QPU Sim  |   |   |
-|   |   | • Xilinx RFSoC DMA       |   <=====>   | • Transparent emulation      |   |   |
-|   |   | • Cryo-telemetry parser  |             | • Zero-config dev machine    |   |   |
-|   |   +--------------------------+             +------------------------------+   |   |
-|   |                                                                               |   |
-|   |   +---------------------------------------+   +---------------------------+   |   |
-|   |   |  GPUDirect-QPU Zero-Copy DMA Bridge   |   |  QMMU Spatial Allocator   |   |   |
-|   |   |  (Direct PCIe P2P: GPU VRAM <-> QPU)  |   |  with Guard-Band Shields  |   |   |
-|   |   +---------------------------------------+   +---------------------------+   |   |
-|   +-------------------------------------------------------------------------------+   |
-+---------------------------------------------------------------------------------------+
-           |                                   |                              |
-           v (PCIe Gen5)                       v (NVLink / PCIe)              v (PCIe / AXI)
-     [ Classical CPU ]                  [ NVIDIA/AMD GPU ]             [ QPU Controller ]
++---------------------------------------------------------------------------------------------------+
+|                             OMNIQ-OS GLASSMORPHIC X11 DESKTOP (:0)                                |
+|  Picom Dual-Kawase Blur + JWM Top Bar + Floating 13-App Dock + Spotlight (Alt+Space) + Control    |
+|                                                                                                   |
+|  +-------------------------+  +-------------------------+  +-----------------------------------+  |
+|  | omniq-hilbert-space     |  | omniq-circuit-maker     |  | omniq-gui (5-Tier Cockpit)        |  |
+|  | • 3D Q-Sphere (HSV)     |  | • Visual Gate Composer  |  | • PREEMPT_RT Jitter & WDT Clamp   |  |
+|  | • Partial-Trace Bloch   |<=> • Time-Slice Scrubber   |  | • 127Q Heavy-Hex QMMU Lattice     |  |
+|  | • Argand & rho Heatmap  |  | • OpenQASM 3 / Qiskit / |  | • RFSoC Scope & <50mK Cryo Guard  |  |
+|  | • Ising exp(-iHt) & IPC |  |   Cirq / PennyLane Sync |  | • omniq-qec | vqe-chem | qpu-3d   |  |
+|  +-------------------------+  +-------------------------+  +-----------------------------------+  |
++---------------------------------------------------------------------------------------------------+
+|                         C++20 CORE ENGINE, DAEMONS & PYTHON SDK                                   |
+|  • omniqd (:9090 HTTP + /dev/shm/omniq_qpu0 + /tmp/omniq_qpu0.sock)                               |
+|  • omniq-secret-api (:9443 7-Modality 3,744B SHM + NIST FIPS 203/204 ML-KEM/DSA + Audit Chain)    |
+|  • omniq-core / libomniq_core.so + libomniq_qpu.so + qpu-smi + omniq / omniqos Python SDK         |
++---------------------------------------------------------------------------------------------------+
+|                     OMNIQ-OS REAL-TIME LINUX KERNEL (7.0.0-43 + omniq_qpu.ko)                     |
+|  • /dev/accel/qpu0 & /sys/class/omniq_accel/accel!qpu0/                                           |
+|  • QMMU Spatial Allocator + Multi-Hop Guard Bands + GPUDirect-QPU Zero-Copy DMA (< 600 ns)        |
+|  • 3-State Auto-Detection (ONLINE_HARDWARE | OFFLINE_MAINTENANCE | SIMULATOR) + <50mK Interlock   |
++---------------------------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 3. Key Subsystems
+## 3. Flagship Native Quantum & OS Suite
 
-### 3.1 Kernel Driver (`drivers/accel/qpu/`)
-Conforming to the Linux kernel Compute Accelerator (`accel`) framework:
-* Device Node: `/dev/accel/qpu0`
-* SysFS Telemetry: `/sys/class/accel/qpu0/`
-* Standardized UAPI: `include/uapi/linux/qpu.h`
+### 3.1 Interactive Hilbert Space Explorer (`bin/omniq-hilbert-space` — `F4`)
+Dedicated multi-qubit quantum state geometry observatory for $|\psi\rangle \in \mathcal{H} = (\mathbb{C}^2)^{\otimes n}$ and mixed density operators $\rho$:
+* **3D Interactive Q-Sphere / Bloch Hypersphere**: Mouse-orbitable 3D sphere grouping computational basis states $|x\rangle \in \{0,1\}^n$ onto Hamming-weight latitude rings with radial probability vectors $|c_x|^2$ and continuous HSV complex phase encoding $\arg(c_x) \in [-\pi, \pi]$.
+* **Reduced Single-Qubit Bloch Sphere Array**: Computes exact partial traces $\rho_k = \mathrm{Tr}_{\neq k}(\rho)$ and renders individual 3D Bloch vectors $\vec{r}_k = (\langle X_k\rangle, \langle Y_k\rangle, \langle Z_k\rangle)$ with local purity $P_k = \mathrm{Tr}(\rho_k^2)$ (demonstrating $|\vec{r}_k|=0$ maximally mixed marginals inside globally pure Bell/GHZ states).
+* **Complex Argand Phasor Disk & Basis Spectrum**: Real-vs-imaginary phasor plane alongside computational basis probabilities.
+* **Density Matrix $\mathrm{Re}(\rho)$ / $\mathrm{Im}(\rho)$ Coherence Heatmap & Schmidt Decomposition**: Live bipartite Von Neumann entanglement entropy $S(\rho_A) = -\mathrm{Tr}(\rho_A \log_2 \rho_A)$, purity $\mathrm{Tr}(\rho^2)$, and Schmidt singular values $\lambda_i$.
+* **Unitary & Open-System Dynamics**: Real-time Ising Hamiltonian evolution $U(t) = e^{-iHt}$, depolarizing noise ($p$), $T_1$ amplitude damping ($\gamma$), and live IPC sync (`/tmp/omniq_hilbert_state.json`) with the Quantum Circuit Maker.
 
-### 3.2 GPUDirect-QPU Zero-Copy DMA (< 600 ns QEC Loop)
-Enables direct PCIe Peer-to-Peer (P2P) BAR mapping between FPGA microwave controllers (e.g. AMD/Xilinx RFSoC) and GPU High-Bandwidth Memory (HBM). Readout syndrome bits stream directly to GPU Tensor Cores, neural decoding executes in $< 150\,\text{ns}$, and Pauli frame rotations are pushed back to the pulse synthesizers—completing in **$500\,\text{ns}$**, well within the qubit coherence window.
+### 3.2 Visual Quantum Circuit Maker & Multi-Framework IDE (`bin/omniq-circuit-maker` — `F6`)
+* **Interactive Multi-Wire Cairo Composer**: Click-to-place 1Q/2Q/3Q gate palette (`H`, `X`, `Y`, `Z`, `S`, `T`, `SX`, `RX`, `RY`, `RZ`, `P`, `CNOT`, `CZ`, `SWAP`, `ISWAP`, `CP`, `CCX`, `CSWAP`, `RESET`, `MEASURE`) across `1..8` qubit wires with right-click deletion and 8 built-in circuit templates (Teleportation, Bell, GHZ, Grover, QFT, $\text{H}_2$ Singlet VQE, Bit-Flip QEC, Superdense Coding).
+* **Time-Slice Statevector Scrubber**: Scrub column-by-column through intermediate circuit layers while inspecting live probability histograms and per-qubit Bloch vectors.
+* **Bi-Directional OpenQASM 3.0 & Multi-SDK Transpiler**: Live editable OpenQASM 3.0 round-trip parser plus automatic **Qiskit**, **Cirq**, and **PennyLane** code synthesis and **RFSoC 5.0 GHz DRAG microwave pulse schedule** visualization.
+* **Hardware QMMU Dispatch & 1-Click Hilbert Beam**: Allocates isolated partitions on `/dev/accel/qpu0` and beams the active quantum state directly into `omniq-hilbert-space`.
 
-### 3.3 Quantum Memory Management Unit (QMMU)
-* **Spatial Multi-Tenancy**: Slices the physical qubit lattice across concurrent tenant processes.
-* **Crosstalk Guard Bands**: Detunes and reserves boundary buffer qubits around active partitions to eliminate capacitive and AC Stark shift leakage.
-* **`q-keepalived` Dynamic Decoupling**: Injects CPMG / XY-8 refocusing pulses during idle periods, extending effective $T_2$ coherence up to $10\times$.
+### 3.3 Production Cryogenic Dilution Lab & Wire-Protocol Instrument Bus (`bin/omniq-cryo-lab` — `F10`)
+* **Real Lab Wire Protocols (`/etc/omniq/lab_rack.conf` + `omniq.lab`)**: Speaks authentic **IEEE-488.2 SCPI** over TCP/LXI, `/dev/usbtmc0`, and POSIX `termios` serial to **Lake Shore Model 372** AC Resistance Bridges (`RDGK?`, `RDGR?` $\text{RuO}_2$, `HTR?`, `RANGE 0,0`) and **Rohde & Schwarz SGS100A / Keysight** Microwave LOs (`SOUR:FREQ:CW`, `OUTP:STAT OFF`), **Bluefors Control Software HTTP REST** (`/values` 5-stage thermometry + `P1..P6` mbar), **RFC Binary MBAP Modbus/TCP** (`FC 0x01/0x03/0x05/0x06` vacuum valves `V1..V21` & HEMT RF bias coil `0`), and **Fermilab QICK `tProc` v2** (`430.08 MHz`, `418.5 ns < 500 ns` `condj` syndrome feedback + 16-bit signed DRAG Gaussian waveforms) for Xilinx Zynq UltraScale+ RFSoC ZCU216 (`/dev/xdma0_*` or JSON-RPC).
+* **Hardware-in-the-Loop Rack Twin (`bin/omniq-lab-twin`)**: Coupled 5-stage cryogenic heat-capacity ODE daemon serving real SCPI (`:17777`, `:15025`), Bluefors HTTP (`:19098`), binary Modbus/TCP (`:15020`), and QICK RPC (`:18888`) out of the box — switchable to physical lab subnet IPs (`192.168.1.x`) in `/etc/omniq/lab_rack.conf` with zero code changes.
 
-### 3.4 Hardware Auto-Detection & Transparent Fallback
-1. **State A (`ONLINE_HARDWARE`)**: FPGA PCIe endpoint detected, cryostat mixing chamber $< 50\,\text{mK}$. Direct microwave synthesis enabled.
-2. **State B (`OFFLINE_MAINTENANCE`)**: FPGA detected but cryostat is warm ($> 50\,\text{mK}$). Read-only diagnostics active; RF pulse generation blocked to protect cryogenic electronics.
-3. **State C (`SIMULATOR`)**: Developer laptop / workstation with no FPGA. Driver seamlessly falls back to high-performance statevector/density matrix emulation. Code executes identically across lab hardware and laptops!
+### 3.4 High-Scale C++20 Simulators, Real `ML-KEM-768` & Mission Control
+* **1,024-Qubit C++20 CHP Clifford & AVX2/OpenMP Engine (`libomniq_core.so`, `omniq.stabilizer`)**: Simulates `127`-qubit GHZ in `0.58 ms`, `1,024`-qubit GHZ in `35 ms`, and 49-qubit `[[25,1,5]]` Surface Code QEC memory rounds in `6.0 ms`, alongside 20-qubit OpenMP + AVX2/FMA dense statevectors in `4.65 ms` and real `clock_nanosleep(TIMER_ABSTIME)` RT scheduling histograms (`bin/omniq-rt-bench` + `scripts/build_preempt_rt_kernel.sh`).
+* **5-Tier Quantum Cockpit (`bin/omniq-gui` — `F5`)**: Hardware wakeup jitter monitor, 127-qubit Heavy-Hex QMMU spatial lattice, RFSoC I/Q scope, 5-stage dilution refrigerator `< 50.0 mK` safety interlock controls, and embedded RT console.
+* **3D Dilution Chandelier & QPU Viewer (`bin/omniq-qpu-3d`)**: Compiled C++17 X11/GLX OpenGL 3D cryostat stages (`50K -> 4K -> Still -> Cold Plate -> 14 mK MXC`) and interactive 127Q lattice.
+* **Surface Code QEC (`bin/omniq-qec` — `F9`) & VQE Chemistry (`bin/omniq-vqe-chem`)**: Interactive $[[d^2,1,d]]$ MWPM syndrome decoder + C++20 CHP tableau benchmark and $\text{H}_2 / \text{LiH} / \text{BeH}_2$ potential energy surface workbench ($< 1.6\,\text{mHa}$ chemical accuracy).
+* **PQC & SOC 2 Security Auditor (`bin/omniq-pqc-audit`) + 7-Modality Secret API (`bin/omniq-secret-api`)**: Authenticated `:9443` daemon with real **NIST FIPS 203 `ML-KEM-768`** ($R_{3329}[X]/(X^{256}+1)$, OpenSSL SHAKE128/SHA3-256) lattice key encapsulation, 3,744-byte POSIX SHM, and SHA-256 hash-chained audit logs.
+* **Complete Glassmorphic Desktop Suite**: `omniq-desktop-backdrop`, `omniq-spotlight` (`Alt+Space`), `omniq-app-launcher` (`F1`), `omniq-control-panel` (`F8`), `omniq-files` (`F3`), `omniq-settings` (`F7`), `omniq-tasks`, `omniq-edit`, `omniq-disks`, `omniq-ports`, `omniq-browser`, `omniq-wallpaper`, `omniq-screensaver`, `omniq-screenshot`, `omniq-power`, and `omniq-installer`.
 
 ---
 
-## 4. Repository Layout
+## 4. Dual Bootable Hybrid `x86_64` ISOs
+
+OmniQ-OS builds two standalone hybrid BIOS + UEFI bootable `x86_64` ISOs:
+
+| Edition | Output File | Size | SHA-256 Checksum | Profile |
+| :--- | :--- | :--- | :--- | :--- |
+| **Full Live Quantum Workstation** | `omniq-os-full.iso` | `688 MB` | `6541f04804dbd8292abab09bb4a2848502e1c3d75ae5a9ed32fdef4c72344319` | Linux `7.0.0-43-generic` + `omniq_qpu.ko`, Zstd SquashFS + OverlayFS (`Live`, `toram`, `persistence`), Xorg + Mesa OpenGL, Picom + JWM desktop, Cryo Dilution Lab (`SCPI`/`Modbus`/`Bluefors`/`QICK`), 1,024Q Clifford & AVX2 Core, `ML-KEM-768`, Hilbert Space Explorer, Circuit Maker & OS suite |
+| **Minimal Cryo-Rack Appliance** | `omniq-os.iso` | `22 MB` | `c5e1247bf29ff4de080e6877ab97bd0705d233b3d24cc0b2432dd36696570fc2` | Pure RAM `initramfs` (`src/init.c` static C PID 1 + BusyBox + `omniq_qpu.ko` + static `qpu-smi` HUD) for ultra-low-jitter cryogenic rack controllers |
+
+---
+
+## 5. Quick Start: Run Locally, Build ISOs & Boot in VirtualBox
+
+```bash
+# 1. Run full automated C UAPI, C++20, PQC Secret API, SDK & Desktop verification suite
+./bin/omniq-test-suite --all
+
+# 2. Launch native GUIs directly on your Linux host (starts omniqd :9090 + secret-api :9443)
+./scripts/run_local.sh hilbert     # or: circuit | cockpit | all
+
+# 3. Build Minimal Cryo-Rack ISO (omniq-os.iso) & Full Workstation ISO (omniq-os-full.iso)
+./scripts/build_iso.sh
+./scripts/build_full_distro_iso.sh
+
+# 4. Provision & Boot VirtualBox VM "OmniQ-OS" (4 vCPUs, 4096 MB RAM, VMSVGA, NAT :19090/:19443)
+./scripts/create_vmbox_omniq.sh start
+```
+
+---
+
+## 6. Repository Layout
 
 ```
-omniqos-linux/
+Omni-QOS/
+├── bin/                        # 30+ native quantum & desktop executables (hilbert-space, circuit-maker, gui, qec, ...)
+├── circuits/                   # Sample OpenQASM 2.0/3.0 circuits (Bell, GHZ, Grover, Teleportation, H2 VQE, Surface Code)
+├── etc/                        # Full /etc hierarchy (omniq-system-init, X11/xinitrc, jwm, picom, gtk-3.0, icons, wallpapers)
 ├── kernel/
-│   ├── drivers/accel/qpu/ # Linux kernel driver (C11)
-│   ├── include/uapi/      # include/uapi/linux/qpu.h
-│   └── dkms.conf          # Dynamic Kernel Module Support configuration
-├── tools/
-│   ├── qpu-smi/           # QPU System Management Interface (TUI & CLI)
-│   └── omniqd/            # Quantum user-space management daemon
+│   ├── drivers/accel/qpu/      # Loadable Linux kernel accelerator module (omniq_qpu.ko)
+│   └── include/uapi/linux/     # Standardized POSIX ioctl UAPI (qpu.h)
+├── lib/                        # Compiled shared libraries (libomniq_qpu.so, libomniq_core.so, libomniq_secret.so)
 ├── runtime/
-│   ├── libomniq-qpu/      # POSIX C userland client library
-│   └── python/            # omniqos Python bindings
-├── distro/
-│   ├── branding/          # Option A SVG and vector brand assets
-│   └── live-build/        # Ubuntu 24.04 LTS PREEMPT_RT ISO builder
-└── tests/
-    └── test_qpu_uapi.c    # POSIX UAPI and QMMU verification test harness
+│   ├── libomniq-qpu/           # POSIX C userland client library
+│   └── python/                 # omniq & omniqos Python quantum SDK (statevector, density matrix, VQE, QEC, PQC)
+├── scripts/                    # Dual ISO builders (build_iso.sh, build_full_distro_iso.sh), VMBox & asset generators
+├── src/
+│   ├── init.c                  # Minimal ISO static C PID 1 init
+│   ├── core/                   # C++20 Quantum Core Engine & 7-Modality PQC Secret API
+│   └── qpu_3d_viewer/          # C++17 X11/GLX OpenGL 3D Cryostat & 127Q Lattice Viewer
+├── tools/qpu-smi/              # Native C QPU System Management Interface CLI & live HUD
+└── tests/                      # C UAPI, C++20 Core, Hilbert/Circuit Maker, PQC Secret API & Desktop test suites
 ```
-
----
-
-## 6. The 7-Pillar Distro Architecture & Unified ISO
-
-OmniQ-OS combines the **Full Live Quantum Workstation** and **Minimal Embedded Appliance** into a single unified hybrid bootable media:
-* **ISO Output**: `OmniQ-OS-24.04-RT-arm64-Remastered.iso` (3.47 GB)
-* **SHA-256**: `a9f76df7123c02d6cdd41ae58e50b62985c360992d5ea66d6e8e82f3f4334a1d`
-
-### 6.1 The 7 Pillars of OmniQ-OS
-1. **Kernel, Drivers & Firmware Assembly**: Linux 6.8 PREEMPT_RT kernel, `/casper/vmlinuz`, hardware driver tree in `drivers/accel/qpu/`, and core isolation parameters (`isolcpus`, `nohz_full`).
-2. **Root Filesystem & Automated ELF Resolver**: FHS layout with recursive ELF linker resolver (`scripts/elf_resolver.py`), verifying 100% dependency closure across shared libraries (`/etc/omniq/elf_manifest.txt`).
-3. **Custom System Daemons & Core Services**: `omniqd` C++ daemon with SCHED_FIFO priority, POSIX Shared Memory (`/dev/shm/omniq_qpu0`), UNIX domain socket (`/tmp/omniq_qpu0.sock`), and sysfs/procfs exports.
-4. **SquashFS Packaging & Custom Initramfs**: Zstandard `filesystem.squashfs`, custom dual-profile initrd with Casper hook `scripts/casper-bottom/95omniq`, supporting Standard Live RAM, `toram` (Copy-to-RAM), and `persistence` (USB overlay).
-5. **Userspace PID 1 & Session Startup**: Virtual filesystem initialization (`/proc`, `/sys`, `/dev`, `/dev/shm`), systemd service orchestration, dual boot targets: Graphical Desktop vs Headless Cryo Rack Console (`multi-user.target`).
-6. **Pre-Bundled User Suite & Disk Installer**: 16 native tools organized into 5 Kali-style FreeDesktop categories (`01 - QPU Accelerators` to `05 - QEC`), plus `/usr/bin/omniq-installer` NVMe/SATA permanent GPT deployment engine.
-7. **Hybrid Bootable ISO Generation & Verification**: Multi-profile `grub.cfg`, repacked with `xorriso`, 100% live tested and visually verified in VirtualBox VM `"OmniQ-OS"`.
-
-### 6.2 Pure Standalone OmniQ-OS (Zero Ubuntu Base Architecture)
-To eliminate upstream desktop bloat and systemd dependency chains, OmniQ-OS also provides the **Pure Standalone Edition** built from scratch:
-* **ISO Output**: `OmniQ-OS-Pure-24.04-RT-arm64.iso` (165.25 MB — **95.4% size reduction**)
-* **SHA-256**: `2006107713a8802e6cd3f3caff43bfb1073ef7d36f26ba55e3a7a433c12c2c51`
-* **PID 1 / Init**: Pure POSIX `/sbin/init` (sub-second boot, < 120 MB RAM footprint)
-* **Live Initramfs**: Standalone CPIO `initrd.img` (1.09 MB) with storage module auto-probing
-* **RootFS**: Pure Zstandard SquashFS (38.47 MB) containing only the 26 required `.so` libraries resolved recursively via `elf_resolver.py`
-* **Profiles**: Workstation (VQE simulation + interactive bash prompt) & Embedded Cryogenic Appliance (foreground `qpu-smi --watch` ANSI HUD)
 
 ---
 
 ## 7. License
 
-OmniQ-OS kernel subsystems are licensed under **GPLv2** (as required for upstream Linux kernel drivers). Userland libraries, tools, and runtimes are licensed under the **Apache License, Version 2.0**.
-
+OmniQ-OS kernel subsystems (`kernel/`) are licensed under **GPLv2**. Userland libraries, C++20 engines, desktop shell components, quantum studios, and SDK runtimes are licensed under the **Apache License, Version 2.0**.

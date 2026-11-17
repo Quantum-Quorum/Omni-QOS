@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""
+=============================================================================
+OmniQ-OS: Real-Time Quantum Linux - Desktop Wallpaper Subsystem & Gallery
+Component: bin/omniq-wallpaper
+Universal wallpaper manager & GTK3 visual gallery for OmniQ-OS.
+Supports atomic multi-path config persistence, live SIGUSR1 IPC to
+omniq-desktop-backdrop, X11 root window sync, and --gui visual picker.
+=============================================================================
+"""
+
+import sys
+import os
+import json
+import time
+import glob
+import signal
+import shutil
+import subprocess
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_DIR = os.path.expanduser("~/.config/omniq")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "wallpaper.conf")
+SHARED_CONFIG = "/tmp/omniq_wallpaper.conf"
+GLOBAL_CONFIG = "/etc/omniq/wallpaper.conf"
+REPO_CONFIG = os.path.join(REPO_ROOT, "etc/omniq/wallpaper.conf")
+
+WALLPAPER_TITLES = {
+    "wallpaper.png": ("Quantum Horizon", "Flagship Tri-Compute Emblem"),
+    "wallpaper_cryo.png": ("Cryostat 14.2mK", "5-Stage Dilution Refrigerator"),
+    "wallpaper_hilbert.png": ("Hilbert Manifold", "3D Bloch Sphere Geodesics"),
+    "wallpaper_heavyhex.png": ("128Q Heavy-Hex", "QMMU Guard-Band Lattice"),
+    "wallpaper_surfacecode.png": ("Surface Code QEC", "Stabilizer MWPM Decoder"),
+    "wallpaper_obsidian.png": ("Quantum Obsidian", "Minimalist Studio Canvas"),
+}
+
+
+def resolve_wallpaper_path(image_path):
+    if not image_path:
+        return None
+    expanded = os.path.abspath(os.path.expanduser(image_path))
+    if os.path.isfile(expanded):
+        return os.path.realpath(expanded)
+
+    search_dirs = [
+        "/usr/share/omniq",
+        "/etc/omniq",
+        os.path.join(REPO_ROOT, "etc/omniq"),
+        os.path.expanduser("~/Pictures/Wallpapers"),
+        os.path.expanduser("~/Pictures"),
+    ]
+    for d in search_dirs:
+        cand = os.path.join(d, image_path)
+        if os.path.isfile(cand):
+            return os.path.realpath(cand)
+    return None
+
+
+def get_current_config():
+    candidates = [CONFIG_FILE, SHARED_CONFIG, GLOBAL_CONFIG, REPO_CONFIG]
+    best_cfg = None
+    best_time = -1.0
+    for cfg_path in candidates:
+        if not os.path.isfile(cfg_path):
+            continue
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                ts = float(data.get("updated_at", 0) or os.path.getmtime(cfg_path))
+                if ts > best_time:
+                    best_time = ts
+                    best_cfg = data
+        except Exception:
+            continue
+
+    if best_cfg:
+        return best_cfg
+
+    default_path = resolve_wallpaper_path("wallpaper.png") or "/etc/omniq/wallpaper.png"
+    return {
+        "mode": "image",
+        "path": default_path,
+        "color": "#0D0B18",
+        "updated_at": 0,
+    }
+
+
+def _atomic_write_json(file_path, data, mode=0o644):
+    try:
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        tmp_path = f"{file_path}.tmp.{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp_path, mode)
+        except Exception:
+            pass
+        os.replace(tmp_path, file_path)
+        return True
+    except Exception:
+        return False
+
+
+def save_config(cfg_data):
+    cfg_data["updated_at"] = time.time()
+    _atomic_write_json(CONFIG_FILE, cfg_data, 0o644)
+    _atomic_write_json(SHARED_CONFIG, cfg_data, 0o666)
+    if os.access("/etc/omniq", os.W_OK) or os.geteuid() == 0:
+        _atomic_write_json(GLOBAL_CONFIG, cfg_data, 0o644)
+
+
+def get_available_wallpapers():
+    seen = set()
+    available = []
+    search_dirs = [
+        "/usr/share/omniq",
+        "/etc/omniq",
+        os.path.join(REPO_ROOT, "etc/omniq"),
+        os.path.expanduser("~/Pictures/Wallpapers"),
+    ]
+    for sdir in search_dirs:
+        if not os.path.isdir(sdir):
+            continue
+        for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+            for fpath in sorted(glob.glob(os.path.join(sdir, ext))):
+                bname = os.path.basename(fpath)
+                if bname.startswith("thumb_") or "lock_blur" in bname:
+                    continue
+                real = os.path.realpath(fpath)
+                if real not in seen and os.path.getsize(real) > 1000:
+                    seen.add(real)
+                    available.append(real)
+    return available
+
+
+def notify_desktop_environment(cfg):
+    mode = cfg.get("mode", "image")
+    abs_path = cfg.get("path", "")
+    hex_color = cfg.get("color", "#0D0B18")
+
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == os.getpid():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    cmd = f.read().decode("utf-8", errors="ignore")
+                if "omniq-desktop-backdrop" in cmd:
+                    os.kill(pid, signal.SIGUSR1)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if mode == "image" and abs_path and os.path.isfile(abs_path):
+        if shutil.which("feh"):
+            subprocess.run(["feh", "--bg-fill", abs_path], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif shutil.which("xwallpaper"):
+            subprocess.run(["xwallpaper", "--zoom", abs_path], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        if shutil.which("xsetroot"):
+            subprocess.run(["xsetroot", "-solid", hex_color], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def set_wallpaper_image(image_path):
+    abs_path = resolve_wallpaper_path(image_path)
+    if not abs_path or not os.path.isfile(abs_path):
+        print(f"[-] Error: Wallpaper file not found: {image_path}", file=sys.stderr)
+        return False
+    cfg = {"mode": "image", "path": abs_path, "color": "#0D0B18"}
+    save_config(cfg)
+    notify_desktop_environment(cfg)
+    print(f"[+] Wallpaper updated: {abs_path}")
+    return True
+
+
+def set_solid_color(hex_color):
+    if not hex_color.startswith("#"):
+        hex_color = f"#{hex_color}"
+    cfg = {"mode": "color", "path": "", "color": hex_color}
+    save_config(cfg)
+    notify_desktop_environment(cfg)
+    print(f"[+] Wallpaper set to solid color: {hex_color}")
+    return True
+
+
+def cycle_next():
+    all_wp = get_available_wallpapers()
+    if not all_wp:
+        print("[-] No wallpapers discovered.", file=sys.stderr)
+        return False
+    curr = resolve_wallpaper_path(get_current_config().get("path", "")) or ""
+    idx = ((all_wp.index(curr) + 1) % len(all_wp)) if curr in all_wp else 0
+    return set_wallpaper_image(all_wp[idx])
+
+
+def show_wallpaper_gallery_gui():
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
+
+    GLib.set_prgname("omniq-wallpaper")
+    GLib.set_application_name("OmniQ Wallpaper Gallery")
+
+    win = Gtk.Window(title="Quantum Wallpaper Gallery — OmniQ-OS")
+    win.set_wmclass("omniq-wallpaper", "Omniq-wallpaper")
+    win.set_default_size(780, 500)
+    win.set_position(Gtk.WindowPosition.CENTER)
+    win.set_border_width(16)
+
+    for ic in [
+        "/usr/share/omniq/icons/wallpaper_24.png",
+        "/etc/omniq/icons/wallpaper_24.png",
+        os.path.join(REPO_ROOT, "etc/omniq/icons/wallpaper_24.png"),
+    ]:
+        if os.path.isfile(ic):
+            try:
+                win.set_icon_from_file(ic)
+            except Exception:
+                pass
+            break
+
+    css = b"""
+    window { background-color: #0D0B18; color: #EDEAF5; }
+    .wp-title { font-size: 16px; font-weight: bold; color: #00E5FF; }
+    .wp-sub { font-size: 11px; color: #9E97B8; }
+    .wp-card {
+        background-color: #141126;
+        border: 1px solid rgba(138, 79, 255, 0.40);
+        border-radius: 10px;
+        padding: 8px;
+    }
+    .wp-card:hover {
+        background-color: #1A1530;
+        border-color: #00E5FF;
+    }
+    .wp-name { font-size: 12px; font-weight: bold; color: #FFFFFF; }
+    .wp-desc { font-size: 10px; color: #9E97B8; }
+    .wp-status { font-size: 11px; font-weight: bold; color: #00FF9D; }
+    """
+    prov = Gtk.CssProvider()
+    prov.load_from_data(css)
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    )
+
+    vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    win.add(vbox)
+
+    hdr = Gtk.Label(label="OmniQ Quantum Wallpaper Gallery")
+    hdr.set_xalign(0.0)
+    hdr.get_style_context().add_class("wp-title")
+    vbox.pack_start(hdr, False, False, 0)
+
+    sub = Gtk.Label(label="Select a 1920x1080 Quantum or Cryostat backdrop to apply live across the workspace:")
+    sub.set_xalign(0.0)
+    sub.get_style_context().add_class("wp-sub")
+    vbox.pack_start(sub, False, False, 0)
+
+    status_lbl = Gtk.Label(label="")
+    status_lbl.set_xalign(0.0)
+    status_lbl.get_style_context().add_class("wp-status")
+
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+
+    grid = Gtk.Grid()
+    grid.set_column_spacing(12)
+    grid.set_row_spacing(12)
+    grid.set_column_homogeneous(True)
+    scroll.add(grid)
+    vbox.pack_start(scroll, True, True, 0)
+
+    wps = get_available_wallpapers()
+    for i, wp_path in enumerate(wps):
+        bname = os.path.basename(wp_path)
+        title_txt, desc_txt = WALLPAPER_TITLES.get(bname, (bname, "Custom Wallpaper"))
+        stem = bname.replace("wallpaper_", "").replace(".png", "")
+        thumb_name = "thumb_wallpaper.png" if bname == "wallpaper.png" else f"thumb_{stem}.png"
+        thumb_path = resolve_wallpaper_path(thumb_name) or wp_path
+
+        btn = Gtk.Button()
+        btn.get_style_context().add_class("wp-card")
+        cbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+
+        try:
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(thumb_path, 220, 124, False)
+            cbox.pack_start(Gtk.Image.new_from_pixbuf(pix), False, False, 0)
+        except Exception:
+            pass
+
+        nl = Gtk.Label(label=title_txt)
+        nl.set_xalign(0.0)
+        nl.get_style_context().add_class("wp-name")
+        cbox.pack_start(nl, False, False, 0)
+
+        dl = Gtk.Label(label=desc_txt)
+        dl.set_xalign(0.0)
+        dl.get_style_context().add_class("wp-desc")
+        cbox.pack_start(dl, False, False, 0)
+
+        btn.add(cbox)
+
+        def _on_pick(_b, p=wp_path, t=title_txt):
+            set_wallpaper_image(p)
+            status_lbl.set_text(f"[OK] Applied live wallpaper: {t}")
+
+        btn.connect("clicked", _on_pick)
+        grid.attach(btn, i % 3, i // 3, 1, 1)
+
+    vbox.pack_start(status_lbl, False, False, 0)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+
+
+def print_help():
+    print("""OmniQ-OS Desktop Wallpaper Manager: omniq-wallpaper
+Usage:
+  omniq-wallpaper --set <path>      Set desktop background to specified image
+  omniq-wallpaper --color <hex>     Set desktop background to solid color (#0D0B18)
+  omniq-wallpaper --next            Cycle to next system quantum wallpaper
+  omniq-wallpaper --current         Display active wallpaper configuration JSON
+  omniq-wallpaper --list            List all discovered quantum wallpapers
+  omniq-wallpaper --gui             Open GTK3 visual wallpaper gallery
+  omniq-wallpaper --test            Run headless verification check
+  omniq-wallpaper --help            Show this help message
+""")
+
+
+def main():
+    if "--test" in sys.argv:
+        wps = get_available_wallpapers()
+        assert len(wps) >= 6, f"Expected >=6 wallpapers, found {len(wps)}"
+        print(f"[+] omniq-wallpaper headless self-test passed ({len(wps)} wallpapers ready).")
+        return 0
+
+    if len(sys.argv) < 2:
+        if os.environ.get("DISPLAY"):
+            show_wallpaper_gallery_gui()
+        else:
+            print_help()
+        return 0
+
+    arg = sys.argv[1]
+    if arg in ("-h", "--help"):
+        print_help()
+        return 0
+    if arg == "--gui":
+        show_wallpaper_gallery_gui()
+        return 0
+    if arg in ("-s", "--set") or arg.startswith("--set="):
+        path_arg = arg.split("=", 1)[1] if arg.startswith("--set=") else (sys.argv[2] if len(sys.argv) >= 3 else "")
+        if not path_arg:
+            print("[-] Missing path for --set", file=sys.stderr)
+            return 1
+        return 0 if set_wallpaper_image(path_arg) else 1
+    if arg in ("-c", "--color") or arg.startswith("--color="):
+        col_arg = arg.split("=", 1)[1] if arg.startswith("--color=") else (sys.argv[2] if len(sys.argv) >= 3 else "")
+        if not col_arg:
+            print("[-] Missing hex color for --color", file=sys.stderr)
+            return 1
+        return 0 if set_solid_color(col_arg) else 1
+    if arg in ("-n", "--next"):
+        return 0 if cycle_next() else 1
+    if arg == "--current":
+        print(json.dumps(get_current_config(), indent=2))
+        return 0
+    if arg in ("-l", "--list"):
+        wps = get_available_wallpapers()
+        print(f"Discovered {len(wps)} quantum wallpaper(s):")
+        for w in wps:
+            print(f"  * {w}")
+        return 0
+
+    return 0 if set_wallpaper_image(arg) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

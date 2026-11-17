@@ -1,0 +1,60 @@
+#!/bin/bash
+# ==============================================================================
+# OmniQ-OS: Real-Time Quantum Linux - Power Terminal Launcher
+# Launches Terminator with OmniQ Glassmorphic styling, falling back to xterm
+# ==============================================================================
+
+if [ "${1:-}" = "--test" ]; then
+    bash -n "$0" && echo "[+] omniq-terminal syntax OK"
+    exit 0
+fi
+
+export TERM=xterm-256color
+export COLORTERM=truecolor
+export GDK_PIXBUF_MODULE_FILE=/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache
+export XDG_DATA_DIRS=/usr/share:/usr/local/share
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+[ -z "${XDG_CONFIG_HOME:-}" ] && export XDG_CONFIG_HOME="$HOME/.config"
+
+TERM_CONF="/etc/omniq/terminator.config"
+[ -f "$TERM_CONF" ] || TERM_CONF="$REPO_ROOT/etc/omniq/terminator.config"
+
+if [ -f "$TERM_CONF" ] && [ ! -f "$XDG_CONFIG_HOME/terminator/config" ]; then
+    mkdir -p "$XDG_CONFIG_HOME/terminator"
+    cp -a "$TERM_CONF" "$XDG_CONFIG_HOME/terminator/config"
+fi
+
+BASH_RC="/etc/omniq/bash.bashrc"
+[ -f "$BASH_RC" ] || BASH_RC="$REPO_ROOT/etc/omniq/bash.bashrc"
+
+# Priority 1: Multi-Pane Terminator
+if command -v terminator >/dev/null 2>&1; then
+    exec terminator "$@"
+fi
+
+# Fallback: Classic xterm with OmniQ Quantum Obsidian Styling
+XTERM_BIN="$(command -v xterm 2>/dev/null || echo /usr/bin/xterm)"
+if [ $# -gt 0 ]; then
+    exec "$XTERM_BIN" -geometry 104x32 \
+        -fa "DejaVu Sans Mono" -fs 11 \
+        -bg "#0D0B18" -fg "#EDEAF5" -cr "#00E5FF" \
+        -title "OmniQ Quantum Terminal" \
+        "$@"
+else
+    if [ -f "$BASH_RC" ]; then
+        exec "$XTERM_BIN" -geometry 104x32 \
+            -fa "DejaVu Sans Mono" -fs 11 \
+            -bg "#0D0B18" -fg "#EDEAF5" -cr "#00E5FF" \
+            -title "OmniQ Quantum Terminal" \
+            -e /bin/bash --rcfile "$BASH_RC"
+    else
+        exec "$XTERM_BIN" -geometry 104x32 \
+            -fa "DejaVu Sans Mono" -fs 11 \
+            -bg "#0D0B18" -fg "#EDEAF5" -cr "#00E5FF" \
+            -title "OmniQ Quantum Terminal" \
+            -e /bin/bash
+    fi
+fi

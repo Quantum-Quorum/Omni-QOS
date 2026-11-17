@@ -1,0 +1,31 @@
+gtk-theme-name = "Adwaita-dark"
+gtk-font-name = "DejaVu Sans 10"
+gtk-icon-theme-name = "hicolor"
+gtk-cursor-theme-name = "DMZ-White"
+
+style "omniq-dark-default" {
+    bg[NORMAL] = "#0D0B18"
+    bg[PRELIGHT] = "#1A1530"
+    bg[ACTIVE] = "#3D1E6D"
+    bg[SELECTED] = "#8A4FFF"
+    bg[INSENSITIVE] = "#0D0B18"
+
+    fg[NORMAL] = "#EDEAF5"
+    fg[PRELIGHT] = "#FFFFFF"
+    fg[ACTIVE] = "#EDEAF5"
+    fg[SELECTED] = "#FFFFFF"
+    fg[INSENSITIVE] = "#5A5375"
+
+    base[NORMAL] = "#0B0A14"
+    base[PRELIGHT] = "#141126"
+    base[ACTIVE] = "#3D1E6D"
+    base[SELECTED] = "#8A4FFF"
+    base[INSENSITIVE] = "#0D0B18"
+
+    text[NORMAL] = "#EDEAF5"
+    text[PRELIGHT] = "#FFFFFF"
+    text[ACTIVE] = "#FFFFFF"
+    text[SELECTED] = "#FFFFFF"
+    text[INSENSITIVE] = "#5A5375"
+}
+class "GtkWidget" style "omniq-dark-default"

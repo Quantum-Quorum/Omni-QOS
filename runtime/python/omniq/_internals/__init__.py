@@ -1,54 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
 """
-Internal C++ bindings for OmniQ.
-
-This module contains the low-level bindings to the C++ core.
-It imports classes from the compiled _omniq_core extension.
+Internal quantum algorithm primitives for OmniQ.
 """
 
-try:
-    from _omniq_core import Circuit as _Circuit
-    from _omniq_core import Statevector as _Statevector
-    from _omniq_core import GateType
-except ImportError:
-    # Fallback for when the C++ extension is not explicitly installed or in path
-    # Check if we are in development mode and can find the build artifact
-    import sys
-    import os
-    
-    # Try to find the built module in likely build directories
-    possible_paths = [
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../libomniq-core/build")),
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../libomniq-core/build/lib")),
-    ]
-    
-    found = False
-    for path in possible_paths:
-        if os.path.exists(path):
-            sys.path.append(path)
-            try:
-                from _omniq_core import Circuit as _Circuit
-                from _omniq_core import Statevector as _Statevector
-                from _omniq_core import GateType
-                found = True
-                break
-            except ImportError:
-                sys.path.remove(path)
-                continue
-    
-    if not found:
-        raise ImportError("Could not import _omniq_core C++ extension. Please ensure libomniq-core is built.")
+import math
+from typing import Callable, List
+import numpy as np
+from ..circuit import Circuit, Statevector
 
-# Placeholder implementations for classes not yet bound
-class _DensityMatrix:
-    """Placeholder for C++ DensityMatrix class."""
-    def __init__(self, num_qubits=0, matrix=None):
-        self.num_qubits = num_qubits if matrix is None else len(matrix).bit_length() - 1
-    # ... implementation omitted for brevity, would need real binding ...
 
 class _GroversAlgorithm:
-    """Placeholder for C++ GroversAlgorithm class."""
-    pass
+    def __init__(self, num_qubits: int, oracle: Callable[[int], bool], num_solutions: int = 1):
+        self.num_qubits = int(num_qubits)
+        self.oracle = oracle
+        self.num_solutions = max(1, int(num_solutions))
+        N = 1 << self.num_qubits
+        self.optimal_iterations = max(1, int(round((math.pi / 4.0) * math.sqrt(N / self.num_solutions))))
+
+    def run(self) -> Statevector:
+        N = 1 << self.num_qubits
+        amps = np.ones(N, dtype=np.complex128) / math.sqrt(N)
+        marked = np.array([-1.0 if self.oracle(i) else 1.0 for i in range(N)], dtype=np.complex128)
+        for _ in range(self.optimal_iterations):
+            amps = amps * marked
+            mean = np.mean(amps)
+            amps = 2.0 * mean - amps
+        return Statevector(amps, normalize=True)
+
 
 class _QPE:
-    """Placeholder for C++ QPE class."""
-    pass
+    def __init__(self, num_precision_qubits: int, num_eigenstate_qubits: int, phase_fraction: float = 0.25):
+        self.num_precision_qubits = int(num_precision_qubits)
+        self.num_eigenstate_qubits = int(num_eigenstate_qubits)
+        self.phase_fraction = float(phase_fraction)
+
+    def estimate(self) -> float:
+        m = 1 << self.num_precision_qubits
+        k = round((self.phase_fraction % 1.0) * m) % m
+        return float(k) / float(m)
