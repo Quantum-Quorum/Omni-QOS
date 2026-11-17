@@ -35,3 +35,4 @@ class OmniQPennyLaneDevice:
         if self._partition:
             self._partition.free()
             self._partition = None
+

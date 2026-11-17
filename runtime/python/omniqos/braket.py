@@ -52,3 +52,4 @@ class OmniQBraketResult:
     def __init__(self, counts: Dict[str, int], shots: int):
         self.measurement_counts = counts
         self.shots = shots
+

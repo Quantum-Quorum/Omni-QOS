@@ -82,3 +82,4 @@ class OmniQResult:
     @property
     def execution_time_ns(self) -> int:
         return self._job.execution_time_ns
+

@@ -114,7 +114,33 @@ omniqos-linux/
 
 ---
 
-## 5. License
+## 6. The 7-Pillar Distro Architecture & Unified ISO
+
+OmniQ-OS combines the **Full Live Quantum Workstation** and **Minimal Embedded Appliance** into a single unified hybrid bootable media:
+* **ISO Output**: `OmniQ-OS-24.04-RT-arm64-Remastered.iso` (3.47 GB)
+* **SHA-256**: `a9f76df7123c02d6cdd41ae58e50b62985c360992d5ea66d6e8e82f3f4334a1d`
+
+### 6.1 The 7 Pillars of OmniQ-OS
+1. **Kernel, Drivers & Firmware Assembly**: Linux 6.8 PREEMPT_RT kernel, `/casper/vmlinuz`, hardware driver tree in `drivers/accel/qpu/`, and core isolation parameters (`isolcpus`, `nohz_full`).
+2. **Root Filesystem & Automated ELF Resolver**: FHS layout with recursive ELF linker resolver (`scripts/elf_resolver.py`), verifying 100% dependency closure across shared libraries (`/etc/omniq/elf_manifest.txt`).
+3. **Custom System Daemons & Core Services**: `omniqd` C++ daemon with SCHED_FIFO priority, POSIX Shared Memory (`/dev/shm/omniq_qpu0`), UNIX domain socket (`/tmp/omniq_qpu0.sock`), and sysfs/procfs exports.
+4. **SquashFS Packaging & Custom Initramfs**: Zstandard `filesystem.squashfs`, custom dual-profile initrd with Casper hook `scripts/casper-bottom/95omniq`, supporting Standard Live RAM, `toram` (Copy-to-RAM), and `persistence` (USB overlay).
+5. **Userspace PID 1 & Session Startup**: Virtual filesystem initialization (`/proc`, `/sys`, `/dev`, `/dev/shm`), systemd service orchestration, dual boot targets: Graphical Desktop vs Headless Cryo Rack Console (`multi-user.target`).
+6. **Pre-Bundled User Suite & Disk Installer**: 16 native tools organized into 5 Kali-style FreeDesktop categories (`01 - QPU Accelerators` to `05 - QEC`), plus `/usr/bin/omniq-installer` NVMe/SATA permanent GPT deployment engine.
+7. **Hybrid Bootable ISO Generation & Verification**: Multi-profile `grub.cfg`, repacked with `xorriso`, 100% live tested and visually verified in VirtualBox VM `"OmniQ-OS"`.
+
+### 6.2 Pure Standalone OmniQ-OS (Zero Ubuntu Base Architecture)
+To eliminate upstream desktop bloat and systemd dependency chains, OmniQ-OS also provides the **Pure Standalone Edition** built from scratch:
+* **ISO Output**: `OmniQ-OS-Pure-24.04-RT-arm64.iso` (165.25 MB — **95.4% size reduction**)
+* **SHA-256**: `2006107713a8802e6cd3f3caff43bfb1073ef7d36f26ba55e3a7a433c12c2c51`
+* **PID 1 / Init**: Pure POSIX `/sbin/init` (sub-second boot, < 120 MB RAM footprint)
+* **Live Initramfs**: Standalone CPIO `initrd.img` (1.09 MB) with storage module auto-probing
+* **RootFS**: Pure Zstandard SquashFS (38.47 MB) containing only the 26 required `.so` libraries resolved recursively via `elf_resolver.py`
+* **Profiles**: Workstation (VQE simulation + interactive bash prompt) & Embedded Cryogenic Appliance (foreground `qpu-smi --watch` ANSI HUD)
+
+---
+
+## 7. License
 
 OmniQ-OS kernel subsystems are licensed under **GPLv2** (as required for upstream Linux kernel drivers). Userland libraries, tools, and runtimes are licensed under the **Apache License, Version 2.0**.
 

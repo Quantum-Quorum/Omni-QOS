@@ -36,3 +36,4 @@ terminal-font: "Unifont Regular 16"
     bar_style = "progress_bar_c.png"
     highlight_style = "progress_highlight_c.png"
 }
+

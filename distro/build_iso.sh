@@ -1,8 +1,8 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# OmniQ-OS 24.04 LTS (Noble Numbat) Real-Time ISO Generator
-# Assembles bootable live ISO image with PREEMPT_RT kernel and QPU drivers.
+# OmniQ-OS Debian Real-Time Quantum Linux (XFCE Edition) ISO Generator
+# Assembles bootable live ISO image with PREEMPT_RT kernel, XFCE desktop, and QPU drivers.
 #
 # Copyright (C) 2026 OmniQ Project.
 
@@ -13,15 +13,16 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${REPO_ROOT}/build/iso"
 
 echo "================================================================="
-echo " OmniQ-OS 24.04 LTS Real-Time Quantum Linux ISO Builder          "
-echo " Target Architecture: x86_64 (amd64)                            "
-echo " Kernel Configuration: Linux 6.8 PREEMPT_RT                     "
+echo " OmniQ-OS Debian Real-Time Quantum Linux (XFCE Edition) Builder   "
+echo " Target Architecture: ARM64 (aarch64)                           "
+echo " Desktop Environment: XFCE 4 (Kali-Style Obsidian/Cyan Theme)   "
+echo " Kernel Configuration: PREEMPT_RT Quantum Drivers                "
 echo "================================================================="
 
 # Check for live-build tools
 if ! command -v lb >/dev/null 2>&1; then
     echo "Notice: 'lb' (live-build) is not installed on this host."
-    echo "To produce physical ISO images on an Ubuntu/Debian build server:"
+    echo "To produce physical ISO images on a Debian build server:"
     echo "  sudo apt-get update && sudo apt-get install -y live-build debootstrap"
     echo ""
     echo "[DRY-RUN] Validating directory tree and assembling chroot overlays..."
@@ -94,12 +95,13 @@ if command -v lb >/dev/null 2>&1; then
     echo "[OmniQ-OS] Executing lb build (requires root privileges)..."
     sudo lb build
     echo "================================================================="
-    echo " SUCCESS: Generated OmniQ-OS-24.04-RT-amd64.iso                   "
+    echo " SUCCESS: Generated OmniQ-OS-XFCE-Debian-arm64.iso              "
     echo "================================================================="
 else
     echo "================================================================="
     echo " READY: Live-build chroot overlay assembled and validated!       "
-    echo " When running on Ubuntu 24.04 build infrastructure, execute:      "
+    echo " When running on Debian/Linux build infrastructure, execute:      "
     echo "   cd ${BUILD_DIR} && sudo lb config && sudo lb build            "
     echo "================================================================="
 fi
+

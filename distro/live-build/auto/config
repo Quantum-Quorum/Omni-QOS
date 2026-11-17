@@ -1,18 +1,20 @@
 #!/bin/sh
 set -e
 
+# Kali-Style Debian Live-Build Configuration
 lb config noauto \
-    --mode ubuntu \
-    --distribution noble \
-    --architectures amd64 \
-    --archive-areas "main restricted universe multiverse" \
-    --mirror-bootstrap "http://archive.ubuntu.com/ubuntu/" \
-    --mirror-chroot "http://archive.ubuntu.com/ubuntu/" \
-    --mirror-binary "http://archive.ubuntu.com/ubuntu/" \
-    --linux-packages "linux-image-rt-amd64" \
+    --mode debian \
+    --distribution bookworm \
+    --architectures arm64 \
+    --archive-areas "main contrib non-free non-free-firmware" \
+    --mirror-bootstrap "http://deb.debian.org/debian/" \
+    --mirror-chroot "http://deb.debian.org/debian/" \
+    --mirror-binary "http://deb.debian.org/debian/" \
+    --linux-packages "linux-image-rt-arm64" \
     --bootloader grub-efi \
-    --image-name "OmniQ-OS-24.04-RT-amd64" \
-    --iso-application "OmniQ-OS Real-Time Quantum Linux" \
+    --image-name "OmniQ-OS-XFCE-Debian-arm64" \
+    --iso-application "OmniQ-OS Real-Time Quantum Linux (XFCE Edition)" \
     --iso-publisher "OmniQ Project <developers@omniq.org>" \
-    --iso-volume "OMNIQOS_2404_RT" \
+    --iso-volume "OMNIQ_XFCE" \
     "${@}"
+

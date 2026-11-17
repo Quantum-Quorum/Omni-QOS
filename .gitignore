@@ -28,3 +28,8 @@ __pycache__/
 *.pyc
 *.pyo
 
+
+# ISO images and checksums
+*.iso
+*.iso.sha256
+
